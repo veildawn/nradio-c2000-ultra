@@ -1,0 +1,2947 @@
+diff --git a/package/mtk/drivers/mt_wifi7/patches/950-linux612-unaligned-header.patch b/package/mtk/drivers/mt_wifi7/patches/950-linux612-unaligned-header.patch
+new file mode 100644
+index 0000000..63515df
+--- /dev/null
++++ b/package/mtk/drivers/mt_wifi7/patches/950-linux612-unaligned-header.patch
+@@ -0,0 +1,16 @@
++--- a/mt_wifi/include/os/rt_linux.h
+++++ b/mt_wifi/include/os/rt_linux.h
++@@ -50,7 +50,12 @@
++ #include <linux/unistd.h>
++ #include <asm/uaccess.h>
++ #include <asm/types.h>
++-#include <asm/unaligned.h>	/* for get_unaligned() */
+++#include <linux/version.h>
+++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+++#include <linux/unaligned.h>
+++#else
+++#include <asm/unaligned.h>
+++#endif	/* for get_unaligned() */
++ 
++ #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27)
++ #include <linux/pid.h>
+diff --git a/package/mtk/drivers/mt_wifi7/patches/951-linux612-qos-event-bounds.patch b/package/mtk/drivers/mt_wifi7/patches/951-linux612-qos-event-bounds.patch
+new file mode 100644
+index 0000000..474b748
+--- /dev/null
++++ b/package/mtk/drivers/mt_wifi7/patches/951-linux612-qos-event-bounds.patch
+@@ -0,0 +1,33 @@
++--- a/mt_wifi/common/qos.c
+++++ b/mt_wifi/common/qos.c
++@@ -595,6 +595,7 @@
++ {
++ 	struct wapp_event event;
++ 	struct wapp_qos_action_frame *req_data = NULL;
+++	u8 *frame_data;
++ 
++ 	/*wapp event header+mscs_header len = 24*/
++ #ifndef offsetof
++@@ -609,6 +610,9 @@
++ 		return 1;
++ 	}
++ 
+++	if (!wdev || !wdev->if_dev || !peer_mac_addr || !frm)
+++		return 1;
+++
++ 	NdisZeroMemory(&event, sizeof(event));
++ 	event.ifindex = RtmpOsGetNetIfIndex(wdev->if_dev);
++ 	event.event_id = WAPP_QOS_ACTION_FRAME_EVENT;
++@@ -619,7 +623,11 @@
++ 		req_data->frm_len = frm_len;
++ 		req_data->chan = channel;
++ 
++-		NdisCopyMemory(req_data->frm, frm, frm_len);
+++		/* frm[0] is an ABI placeholder inside event.data. Address the
+++		 * checked enclosing storage so FORTIFY sees its actual capacity. */
+++		frame_data = (u8 *)&event + offsetof(struct wapp_event, data) +
+++			offsetof(struct wapp_qos_action_frame, frm);
+++		NdisCopyMemory(frame_data, frm, frm_len);
++ 		MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_QOS_MAP, DBG_LVL_INFO,
++ 			"to wapp, src mac:%02x:%02x:%02x:%02x:%02x:%02x, frm_len:%lu\n",
++ 			PRINT_MAC(req_data->src), frm_len);
+diff --git a/package/mtk/drivers/mt_wifi7/patches/952-fix-napi-no-progress-spin.patch b/package/mtk/drivers/mt_wifi7/patches/952-fix-napi-no-progress-spin.patch
+new file mode 100644
+index 0000000..721a1a7
+--- /dev/null
++++ b/package/mtk/drivers/mt_wifi7/patches/952-fix-napi-no-progress-spin.patch
+@@ -0,0 +1,40 @@
++--- a/wlan_hwifi/bus/mtk_pci_dma.c
+++++ b/wlan_hwifi/bus/mtk_pci_dma.c
++@@ -1751,12 +1751,14 @@
++ 	struct pci_trans *trans;
++ 	struct pci_irq_vector_data *vec_data;
++ 	int done = 0, cur;
+++	u32 start_head;
++ 	struct pci_rx_queue *rq;
++ 
++ 	trans = container_of(napi->dev, struct pci_trans, napi_dev);
++ 	q = container_of(napi, struct pci_queue, napi);
++ 	vec_data = &trans->vec_data[q->vec_id];
++ 	rq = (struct pci_rx_queue *)q;
+++	start_head = q->head;
++ 
++ 	q->tail = bus_get_field(to_bus_trans(trans),
++ 			q->hw_didx_addr, q->hw_didx_mask);
++@@ -1775,12 +1777,18 @@
++ 		q->tail = bus_get_field(to_bus_trans(trans),
++ 				q->hw_didx_addr, q->hw_didx_mask);
++ 
++-		/* reschedule if ring is not empty */
++-		if (((q->head + 1) % q->q_size) != q->tail)
+++		/* A producer index can be ahead of descriptor ownership (e.g.
+++		 * WED TX-free completion). Returning a full budget without
+++		 * consuming a descriptor leaves this NAPI instance spinning
+++		 * forever. Re-arm its completion interrupt if no progress was
+++		 * possible; only repoll a non-empty ring after real progress.
+++		 */
+++		if (q->head != start_head &&
+++		    ((q->head + 1) % q->q_size) != q->tail)
++ 			return budget;
++ 
++-		napi_complete(napi);
++-		pci_dma_irq_enable(vec_data, q->hw_int_mask);
+++		if (napi_complete_done(napi, done))
+++			pci_dma_irq_enable(vec_data, q->hw_int_mask);
++ 	}
++ 	return done;
++ }
+diff --git a/package/mtk/drivers/mt_wifi7/patches/953-fix-per-station-rx-failure-counter.patch b/package/mtk/drivers/mt_wifi7/patches/953-fix-per-station-rx-failure-counter.patch
+new file mode 100644
+index 0000000..5a2dfad
+--- /dev/null
++++ b/package/mtk/drivers/mt_wifi7/patches/953-fix-per-station-rx-failure-counter.patch
+@@ -0,0 +1,15 @@
++--- a/mt_wifi/chip/mcu/cmm_fw_uni_event.c
+++++ b/mt_wifi/chip/mcu/cmm_fw_uni_event.c
++@@ -8282,8 +8282,10 @@
++ 			|| IS_ENTRY_REPEATER(pEntry)) && pEntry->Sst == SST_ASSOC) {
++ 			struct UNI_EVENT_ONE_STA_RX_MPDU_COUNT_T *prRxMpduCountResult =
++ 				(struct UNI_EVENT_ONE_STA_RX_MPDU_COUNT_T *)&prEventResult->rRxMpduCountResult[Idx];
++-			if (le2cpu32(prRxMpduCountResult->u4RxTotalMpduCount >
++-					le2cpu32(prRxMpduCountResult->u4RxSuccessMpduCount)))
+++			/* Each station must start at zero, including all-success reports. */
+++			RxFailCount = 0;
+++			if (le2cpu32(prRxMpduCountResult->u4RxTotalMpduCount) >
+++					le2cpu32(prRxMpduCountResult->u4RxSuccessMpduCount))
++ 				RxFailCount = le2cpu32(prRxMpduCountResult->u4RxTotalMpduCount) -
++ 								le2cpu32(prRxMpduCountResult->u4RxSuccessMpduCount);
++ 			pEntry->RxFailCount += RxFailCount;
+diff --git a/package/mtk/drivers/mt_wifi7/patches/954-recover-invalid-rx-dma-descriptors.patch b/package/mtk/drivers/mt_wifi7/patches/954-recover-invalid-rx-dma-descriptors.patch
+new file mode 100644
+index 0000000..0c24f3e
+--- /dev/null
++++ b/package/mtk/drivers/mt_wifi7/patches/954-recover-invalid-rx-dma-descriptors.patch
+@@ -0,0 +1,117 @@
++--- a/wlan_hwifi/bus/mtk_pci_dma.c
+++++ b/wlan_hwifi/bus/mtk_pci_dma.c
++@@ -1488,6 +1488,26 @@
++ 	return 0;
++ }
++ 
+++/* Descriptor faults leave the RX head unchanged. Ask the existing firmware
+++ * SER manager to reset DMA instead of retrying the same corrupt entry forever.
+++ * The callback only queues work and is explicitly safe from NAPI context.
+++ */
+++static int
+++pci_dma_rx_desc_fault(struct pci_trans *trans, struct pci_queue *q, u32 idx)
+++{
+++	static DEFINE_RATELIMIT_STATE(recovery_rs, 30 * HZ, 1);
+++	struct mtk_hw_dev *dev = to_hw_dev(trans);
+++
+++	if (__ratelimit(&recovery_rs)) {
+++		dev_err(to_device(trans),
+++			"RX descriptor fault on %s idx=%u; requesting firmware DMA recovery\n",
+++			q->q_info, idx);
+++		mtk_bus_rx_ser_event(dev, dev->chip_drv->device_id,
+++			HW_SER_LV_10_0, 0, dev->sys_idx.idx);
+++	}
+++	return -EINVAL;
+++}
+++
++ static int
++ pci_dma_get_data_buf_by_copy(struct pci_trans *trans,
++ 	struct pci_queue *q, u32 idx, struct mtk_bus_rx_info *rx_info)
++@@ -1503,18 +1523,14 @@
++ 
++ 	pci_dma_rxdmad_parser(trans, rq, desc, rx_info);
++ 
+++	/* A zero/stale DMA address must never be returned to hardware or copied. */
+++	if (unlikely(!rx_info->sdp0))
+++		return pci_dma_rx_desc_fault(trans, q, idx);
+++
++ 	ret = mtk_rx_tk_entry_find(to_rx_tk_mgmt(trans), rx_info->id,
++ 				   &rx_info->pkt, &pkt_va, &pkt_pa);
++-	if (ret)
++-		return ret;
++-
++-	new_dma_buf.alloc_size = dma_buf->alloc_size;
++-	new_dma_buf.alloc_va = NULL;
++-	new_dma_buf.alloc_pa = 0;
++-	new_pkt = pci_dma_rx_pkt_alloc(to_device(trans), rq, &new_dma_buf, false);
++-
++-	if (new_pkt == NULL)
++-		return -ENOMEM;
+++	if (ret || unlikely(!rx_info->pkt || !pkt_va))
+++		return pci_dma_rx_desc_fault(trans, q, idx);
++ 
++ 	offset = SKB_HEADROOM_RSV - (pkt_va - rx_info->pkt);
++ 
++@@ -1522,7 +1538,7 @@
++ 		dev_err_once(to_device(trans),
++ 			"%s(): idx = %u, tkid = %u, offset = %d should not negative\n",
++ 			__func__, idx, rx_info->id, offset);
++-		goto err;
+++		return pci_dma_rx_desc_fault(trans, q, idx);
++ 	}
++ 
++ 	if (unlikely(rx_info->sdp0 != pkt_pa)) {
++@@ -1532,8 +1548,15 @@
++ 		dev_err_once(to_device(trans),
++ 			"%s(): RXDMAD DW0: 0x%08x DW1: 0x%08x DW2: 0x%08x DW3: 0x%08x\n",
++ 			__func__, desc->dw0, desc->dw1, desc->dw2, desc->dw3);
++-		goto err;
++-	}
+++		return pci_dma_rx_desc_fault(trans, q, idx);
+++	}
+++
+++	new_dma_buf.alloc_size = dma_buf->alloc_size;
+++	new_dma_buf.alloc_va = NULL;
+++	new_dma_buf.alloc_pa = 0;
+++	new_pkt = pci_dma_rx_pkt_alloc(to_device(trans), rq, &new_dma_buf, false);
+++	if (new_pkt == NULL)
+++		return -ENOMEM;
++ 
++ 	dma_sync_single_for_cpu(to_device(trans), pkt_pa,
++ 		dma_buf->alloc_size, DMA_FROM_DEVICE);
++@@ -1550,9 +1573,6 @@
++ 	fill_rxd(cb, rx_info->id, rq->magic_cnt);
++ 
++ 	return 0;
++-err:
++-	put_page(virt_to_head_page(new_pkt));
++-	return -EINVAL;
++ }
++ 
++ 
++@@ -1593,19 +1613,21 @@
++ 	struct pci_rx_queue *rq = (struct pci_rx_queue *)q;
++ 
++ 	if (flush) {
++-		desc->dw1 |= cpu_to_le32(BIT(RXDMAD_DDONE_SHIFT));
+++		WRITE_ONCE(desc->dw1, READ_ONCE(desc->dw1) | cpu_to_le32(BIT(RXDMAD_DDONE_SHIFT)));
++ 	} else if (rq->get_pkt_method == GET_PKT_IO) {
++ 		if (idx == q->tail)
++ 			return -EINVAL;
++ 	} else if (test_bit(PCI_FLAG_WHNAT_TX, &trans->flags) &&
++ 			q->q_attr == Q_RX_EVENT_TX_FREE_DONE) {
++-		if (!(desc->dw1 & cpu_to_le32(BIT(RXDMAD_DDONE_SHIFT))) ||
++-			!(desc->dw1 & cpu_to_le32(BIT(RXDMAD_M_DONE_SHIFT))))
+++		if (!(READ_ONCE(desc->dw1) & cpu_to_le32(BIT(RXDMAD_DDONE_SHIFT))) ||
+++			!(READ_ONCE(desc->dw1) & cpu_to_le32(BIT(RXDMAD_M_DONE_SHIFT))))
++ 			return -EINVAL;
++-	} else if (!(desc->dw1 & cpu_to_le32(BIT(RXDMAD_DDONE_SHIFT)))) {
+++	} else if (!(READ_ONCE(desc->dw1) & cpu_to_le32(BIT(RXDMAD_DDONE_SHIFT)))) {
++ 		return -EINVAL;
++ 	}
++ 
+++	/* Coherent DMA still needs ordering after device ownership changes. */
+++	dma_rmb();
++ 	return pci_dma_get_buf(trans, q, idx, rx_info);
++ }
++ 
+diff --git a/package/mtk/drivers/mt_wifi_osal/patches/950-linux612-headers.patch b/package/mtk/drivers/mt_wifi_osal/patches/950-linux612-headers.patch
+new file mode 100644
+index 0000000..56a4020
+--- /dev/null
++++ b/package/mtk/drivers/mt_wifi_osal/patches/950-linux612-headers.patch
+@@ -0,0 +1,25 @@
++--- a/mt_osal_csi.c
+++++ b/mt_osal_csi.c
++@@ -3,7 +3,12 @@
++ #include <linux/netdevice.h>
++ #include <linux/types.h>
++ #include <linux/proc_fs.h>
+++#include <linux/version.h>
+++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+++#include <linux/unaligned.h>
+++#else
++ #include <asm/unaligned.h>
+++#endif
++ 
++ #define SUBMODULE "mt_osal_csi"
++ #include <mt_osal_debug.h>
++--- a/mt_osal_proc.c
+++++ b/mt_osal_proc.c
++@@ -4,6 +4,7 @@
++ #include <linux/netdevice.h>
++ #include <linux/types.h>
++ #include <linux/proc_fs.h>
+++#include <linux/version.h>
++ 
++ #define SUBMODULE "mt_osal_proc"
++ #include <mt_osal_debug.h>
+diff --git a/target/linux/generic/backport-6.12/732-v6.18-wifi-mt76-wed-use-proper-wed-reference-in-mt76-wed-d.patch b/target/linux/generic/backport-6.12/732-v6.18-wifi-mt76-wed-use-proper-wed-reference-in-mt76-wed-d.patch
+deleted file mode 100644
+index 883de54..0000000
+--- a/target/linux/generic/backport-6.12/732-v6.18-wifi-mt76-wed-use-proper-wed-reference-in-mt76-wed-d.patch
++++ /dev/null
+@@ -1,79 +0,0 @@
+-From: Lorenzo Bianconi <lorenzo@kernel.org>
+-Date: Wed, 8 Oct 2025 12:41:48 +0200
+-Subject: [PATCH] wifi: mt76: wed: use proper wed reference in mt76 wed driver
+- callabacks
+-
+-MT7996 driver can use both wed and wed_hif2 devices to offload traffic
+-from/to the wireless NIC. In the current codebase we assume to always
+-use the primary wed device in wed callbacks resulting in the following
+-crash if the hw runs wed_hif2 (e.g. 6GHz link).
+-
+-[  297.455876] Unable to handle kernel read from unreadable memory at virtual address 000000000000080a
+-[  297.464928] Mem abort info:
+-[  297.467722]   ESR = 0x0000000096000005
+-[  297.471461]   EC = 0x25: DABT (current EL), IL = 32 bits
+-[  297.476766]   SET = 0, FnV = 0
+-[  297.479809]   EA = 0, S1PTW = 0
+-[  297.482940]   FSC = 0x05: level 1 translation fault
+-[  297.487809] Data abort info:
+-[  297.490679]   ISV = 0, ISS = 0x00000005, ISS2 = 0x00000000
+-[  297.496156]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+-[  297.501196]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+-[  297.506500] user pgtable: 4k pages, 39-bit VAs, pgdp=0000000107480000
+-[  297.512927] [000000000000080a] pgd=08000001097fb003, p4d=08000001097fb003, pud=08000001097fb003, pmd=0000000000000000
+-[  297.523532] Internal error: Oops: 0000000096000005 [#1] SMP
+-[  297.715393] CPU: 2 UID: 0 PID: 45 Comm: kworker/u16:2 Tainted: G           O       6.12.50 #0
+-[  297.723908] Tainted: [O]=OOT_MODULE
+-[  297.727384] Hardware name: Banana Pi BPI-R4 (2x SFP+) (DT)
+-[  297.732857] Workqueue: nf_ft_offload_del nf_flow_rule_route_ipv6 [nf_flow_table]
+-[  297.740254] pstate: 60400005 (nZCv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+-[  297.747205] pc : mt76_wed_offload_disable+0x64/0xa0 [mt76]
+-[  297.752688] lr : mtk_wed_flow_remove+0x58/0x80
+-[  297.757126] sp : ffffffc080fe3ae0
+-[  297.760430] x29: ffffffc080fe3ae0 x28: ffffffc080fe3be0 x27: 00000000deadbef7
+-[  297.767557] x26: ffffff80c5ebca00 x25: 0000000000000001 x24: ffffff80c85f4c00
+-[  297.774683] x23: ffffff80c1875b78 x22: ffffffc080d42cd0 x21: ffffffc080660018
+-[  297.781809] x20: ffffff80c6a076d0 x19: ffffff80c6a043c8 x18: 0000000000000000
+-[  297.788935] x17: 0000000000000000 x16: 0000000000000001 x15: 0000000000000000
+-[  297.796060] x14: 0000000000000019 x13: ffffff80c0ad8ec0 x12: 00000000fa83b2da
+-[  297.803185] x11: ffffff80c02700c0 x10: ffffff80c0ad8ec0 x9 : ffffff81fef96200
+-[  297.810311] x8 : ffffff80c02700c0 x7 : ffffff80c02700d0 x6 : 0000000000000002
+-[  297.817435] x5 : 0000000000000400 x4 : 0000000000000000 x3 : 0000000000000000
+-[  297.824561] x2 : 0000000000000001 x1 : 0000000000000800 x0 : ffffff80c6a063c8
+-[  297.831686] Call trace:
+-[  297.834123]  mt76_wed_offload_disable+0x64/0xa0 [mt76]
+-[  297.839254]  mtk_wed_flow_remove+0x58/0x80
+-[  297.843342]  mtk_flow_offload_cmd+0x434/0x574
+-[  297.847689]  mtk_wed_setup_tc_block_cb+0x30/0x40
+-[  297.852295]  nf_flow_offload_ipv6_hook+0x7f4/0x964 [nf_flow_table]
+-[  297.858466]  nf_flow_rule_route_ipv6+0x438/0x4a4 [nf_flow_table]
+-[  297.864463]  process_one_work+0x174/0x300
+-[  297.868465]  worker_thread+0x278/0x430
+-[  297.872204]  kthread+0xd8/0xdc
+-[  297.875251]  ret_from_fork+0x10/0x20
+-[  297.878820] Code: 928b5ae0 8b000273 91400a60 f943fa61 (79401421)
+-[  297.884901] ---[ end trace 0000000000000000 ]---
+-
+-Fix the issue detecting the proper wed reference to use running wed
+-callabacks.
+-
+--- Partial backport for data structure change only (rest is in the mt76 package)
+-
+-Fixes: 83eafc9251d6 ("wifi: mt76: mt7996: add wed tx support")
+-Tested-by: Daniel Pawlik <pawlik.dan@gmail.com>
+-Tested-by: Matteo Croce <teknoraver@meta.com>
+-Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+-Link: https://patch.msgid.link/20251008-wed-fixes-v1-1-8f7678583385@kernel.org
+-Signed-off-by: Felix Fietkau <nbd@nbd.name>
+----
+-
+---- a/include/linux/soc/mediatek/mtk_wed.h
+-+++ b/include/linux/soc/mediatek/mtk_wed.h
+-@@ -154,6 +154,7 @@ struct mtk_wed_device {
+- 		bool wcid_512;
+- 		bool hw_rro;
+- 		bool msi;
+-+		bool hif2;
+- 
+- 		u16 token_start;
+- 		unsigned int nbuf;
+diff --git a/target/linux/generic/backport-6.12/788-v7.3-net-usb-qmi_wwan-add-Quectel-EG120K-EA.patch b/target/linux/generic/backport-6.12/788-v7.3-net-usb-qmi_wwan-add-Quectel-EG120K-EA.patch
+deleted file mode 100644
+index 64f3b00..0000000
+--- a/target/linux/generic/backport-6.12/788-v7.3-net-usb-qmi_wwan-add-Quectel-EG120K-EA.patch
++++ /dev/null
+@@ -1,60 +0,0 @@
+-From 0f2fd31f63c65c409bd336af3a42d478a9207c1f Mon Sep 17 00:00:00 2001
+-From: Gilberto Conde <gilbertorconde@gmail.com>
+-Date: Mon, 21 Sep 2026 10:34:26 +0100
+-Subject: [PATCH] net: usb: qmi_wwan: add Quectel EG120K-EA
+-
+-Add support for the Quectel EG120K-EA LTE Cat.12 module (USB ID
+-2c7c:030b). Its QMI interface (interface 4) uses class/subclass/protocol
+-ff/ff/ff like the other recent Quectel modules, so match it the same way.
+-
+-The product ID is shared with the EM060K, which the option driver
+-already knows and uses to claim the serial interfaces. Without a
+-qmi_wwan entry the data interface is left unbound.
+-
+-Tested on a GL.iNet GL-X2000, where the module is soldered down and
+-enumerates at SuperSpeed: cdc-wdm0 and wwan0 appear and ModemManager
+-brings up a data session.
+-
+-T:  Bus=02 Lev=01 Prnt=01 Port=00 Cnt=01 Dev#=  2 Spd=5000 MxCh= 0
+-D:  Ver= 3.10 Cls=00(>ifc ) Sub=00 Prot=00 MxPS= 9 #Cfgs=  1
+-P:  Vendor=2c7c ProdID=030b Rev= 5.04
+-S:  Manufacturer=Quectel
+-S:  Product=EG120K-EA
+-S:  SerialNumber=45546267
+-C:* #Ifs= 6 Cfg#= 1 Atr=a0 MxPwr=896mA
+-I:* If#= 0 Alt= 0 #EPs= 2 Cls=ff(vend.) Sub=ff Prot=30 Driver=option
+-E:  Ad=01(O) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-E:  Ad=81(I) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-I:* If#= 1 Alt= 0 #EPs= 3 Cls=ff(vend.) Sub=00 Prot=40 Driver=option
+-E:  Ad=83(I) Atr=03(Int.) MxPS=  10 Ivl=32ms
+-E:  Ad=82(I) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-E:  Ad=02(O) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-I:* If#= 2 Alt= 0 #EPs= 3 Cls=ff(vend.) Sub=ff Prot=40 Driver=option
+-E:  Ad=85(I) Atr=03(Int.) MxPS=  10 Ivl=32ms
+-E:  Ad=84(I) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-E:  Ad=03(O) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-I:* If#= 3 Alt= 0 #EPs= 3 Cls=ff(vend.) Sub=ff Prot=40 Driver=option
+-E:  Ad=87(I) Atr=03(Int.) MxPS=  10 Ivl=32ms
+-E:  Ad=86(I) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-E:  Ad=04(O) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-I:* If#= 4 Alt= 0 #EPs= 3 Cls=ff(vend.) Sub=ff Prot=ff Driver=qmi_wwan
+-E:  Ad=88(I) Atr=03(Int.) MxPS=   8 Ivl=32ms
+-E:  Ad=8e(I) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-E:  Ad=0f(O) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-I:* If#=12 Alt= 0 #EPs= 1 Cls=ff(vend.) Sub=ff Prot=70 Driver=(none)
+-E:  Ad=89(I) Atr=02(Bulk) MxPS=1024 Ivl=0ms
+-
+-Signed-off-by: Gilberto Conde <gilbertorconde@gmail.com>
+-Link: https://patch.msgid.link/20260921093426.2870266-1-gilbertorconde@gmail.com
+-Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+----
+---- a/drivers/net/usb/qmi_wwan.c
+-+++ b/drivers/net/usb/qmi_wwan.c
+-@@ -1085,6 +1085,7 @@ static const struct usb_device_id produc
+- 	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x0122)},	/* Quectel RG650V */
+- 	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x0125)},	/* Quectel EC25, EC20 R2.0  Mini PCIe */
+- 	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x0306)},	/* Quectel EP06/EG06/EM06 */
+-+	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x030b)},	/* Quectel EM060K/EG120K-EA */
+- 	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x0512)},	/* Quectel EG12/EM12 */
+- 	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x0620)},	/* Quectel EM160R-GL */
+- 	{QMI_MATCH_FF_FF_FF(0x2c7c, 0x0800)},	/* Quectel RM500Q-GL */
+diff --git a/target/linux/generic/hack-6.12/750-net-pcs-mtk-lynxi-workaround-2500BaseX-no-an.patch b/target/linux/generic/hack-6.12/750-net-pcs-mtk-lynxi-workaround-2500BaseX-no-an.patch
+index bf26a2f..44dcf50 100644
+--- a/target/linux/generic/hack-6.12/750-net-pcs-mtk-lynxi-workaround-2500BaseX-no-an.patch
++++ b/target/linux/generic/hack-6.12/750-net-pcs-mtk-lynxi-workaround-2500BaseX-no-an.patch
+@@ -13,7 +13,7 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+ 
+ --- a/drivers/net/pcs/pcs-mtk-lynxi.c
+ +++ b/drivers/net/pcs/pcs-mtk-lynxi.c
+-@@ -129,14 +129,23 @@ static void mtk_pcs_lynxi_get_state(stru
++@@ -129,17 +129,29 @@
+  				    struct phylink_link_state *state)
+  {
+  	struct mtk_pcs_lynxi *mpcs = pcs_to_mtk_pcs_lynxi(pcs);
+@@ -21,27 +21,34 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+ +	unsigned int bm, bmsr, adv;
+  
+  	/* Read the BMSR and LPA */
+- 	regmap_read(mpcs->regmap, SGMSYS_PCS_CONTROL_1, &bm);
+--	regmap_read(mpcs->regmap, SGMSYS_PCS_ADVERTISE, &adv);
++-	if (regmap_read(mpcs->regmap, SGMSYS_PCS_CONTROL_1, &bm) ||
++-	    regmap_read(mpcs->regmap, SGMSYS_PCS_ADVERTISE, &adv)) {
+++	if (regmap_read(mpcs->regmap, SGMSYS_PCS_CONTROL_1, &bm)) {
++ 		state->link = false;
++ 		return;
++ 	}
+ +	bmsr = FIELD_GET(SGMII_BMSR, bm);
+-+
++ 
++-	phylink_mii_c22_pcs_decode_state(state, FIELD_GET(SGMII_BMSR, bm),
++-					 FIELD_GET(SGMII_LPA, adv));
+ +	if (state->interface == PHY_INTERFACE_MODE_2500BASEX) {
+ +		state->link = !!(bmsr & BMSR_LSTATUS);
+ +		state->an_complete = !!(bmsr & BMSR_ANEGCOMPLETE);
+ +		state->speed = SPEED_2500;
+ +		state->duplex = DUPLEX_FULL;
+++		return;
+++	}
+ +
+++	if (regmap_read(mpcs->regmap, SGMSYS_PCS_ADVERTISE, &adv)) {
+++		state->link = false;
+ +		return;
+ +	}
+- 
+--	phylink_mii_c22_pcs_decode_state(state, FIELD_GET(SGMII_BMSR, bm),
+--					 FIELD_GET(SGMII_LPA, adv));
+-+	regmap_read(mpcs->regmap, SGMSYS_PCS_ADVERTISE, &adv);
+++
+ +	phylink_mii_c22_pcs_decode_state(state, bmsr, FIELD_GET(SGMII_LPA, adv));
+  }
+  
+  static void mtk_sgmii_reset(struct mtk_pcs_lynxi *mpcs)
+-@@ -157,7 +166,7 @@ static int mtk_pcs_lynxi_config(struct p
++@@ -160,7 +172,7 @@
+  {
+  	struct mtk_pcs_lynxi *mpcs = pcs_to_mtk_pcs_lynxi(pcs);
+  	bool mode_changed = false, changed;
+@@ -50,7 +57,7 @@ Signed-off-by: Daniel Golle <daniel@makrotopia.org>
+  	int advertise, link_timer;
+  
+  	advertise = phylink_mii_c22_pcs_encode_advertisement(interface,
+-@@ -180,9 +189,8 @@ static int mtk_pcs_lynxi_config(struct p
++@@ -183,9 +195,8 @@
+  	if (neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED) {
+  		if (interface == PHY_INTERFACE_MODE_SGMII)
+  			sgm_mode |= SGMII_SPEED_DUPLEX_AN;
+diff --git a/target/linux/generic/kernel-6.12 b/target/linux/generic/kernel-6.12
+index 68dfcf6..9fbddf1 100644
+--- a/target/linux/generic/kernel-6.12
++++ b/target/linux/generic/kernel-6.12
+@@ -1,2 +1,2 @@
+-LINUX_VERSION-6.12 = .112
+-LINUX_KERNEL_HASH-6.12.112 = 164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03
++LINUX_VERSION-6.12 = .117
++LINUX_KERNEL_HASH-6.12.117 = 74e99aa5e60e242e0a165fed8cb2ea0d054bf7a401f01861d403d75733456613
+diff --git a/target/linux/mediatek/dts-ext/mt7987a-nradio-c2000ultra.dts b/target/linux/mediatek/dts-ext/mt7987a-nradio-c2000ultra.dts
+new file mode 100644
+index 0000000..c0377f2
+--- /dev/null
++++ b/target/linux/mediatek/dts-ext/mt7987a-nradio-c2000ultra.dts
+@@ -0,0 +1,188 @@
++// SPDX-License-Identifier: (GPL-2.0 OR MIT)
++// Candidate board port, derived from this router's running DTB.
++// Not accepted for installation until kernel/DTS/driver validation completes.
++/dts-v1/;
++#include "mt7987a.dtsi"
++#include <dt-bindings/input/input.h>
++
++/ {
++	model = "NRadio-C2000Ultra";
++	compatible = "NRadio-C2000MAX-Ultra", "mediatek,mt7987a", "mediatek,mt7987";
++
++	aliases {
++		serial0 = &uart0;
++		led-boot = &led_status;
++		led-failsafe = &led_status;
++		led-running = &led_status;
++		led-upgrade = &led_status;
++	};
++
++	chosen {
++		// Same TF layout as the running third-party image: GPT partition "rootfs".
++		bootargs = "console=ttyS0,115200n1 earlycon=uart8250,mmio32,0x11000000 pci=pcie_bus_perf root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs";
++		stdout-path = "serial0:115200n8";
++	};
++
++	memory@40000000 {
++		device_type = "memory";
++		/* Factory 2.3.9 and Mwrt 1159 both describe 256 MiB at 0x40000000. */
++		reg = <0x0 0x40000000 0x0 0x10000000>;
++	};
++
++	reg_3p3v: regulator-3p3v {
++		compatible = "regulator-fixed";
++		regulator-name = "fixed-3.3V";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		regulator-boot-on;
++		regulator-always-on;
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++		reset { label = "reset"; linux,code = <KEY_RESTART>; gpios = <&pio 1 GPIO_ACTIVE_LOW>; debounce-interval = <10>; };
++		wps { label = "wps"; linux,code = <KEY_WPS_BUTTON>; gpios = <&pio 0 GPIO_ACTIVE_LOW>; debounce-interval = <10>; };
++	};
++
++	gpio-leds {
++		compatible = "gpio-leds";
++		led_status: status { label = "hc:blue:status"; gpios = <&pio 9 GPIO_ACTIVE_LOW>; default-state = "on"; };
++		cmode5 { label = "hc:blue:cmode5"; gpios = <&pio 8 GPIO_ACTIVE_LOW>; };
++		cmode4 { label = "hc:blue:cmode4"; gpios = <&pio 11 GPIO_ACTIVE_LOW>; };
++		internet { label = "hc:red:int"; gpios = <&pio 10 GPIO_ACTIVE_LOW>; };
++		error { label = "hc:red:error"; gpios = <&pio 12 GPIO_ACTIVE_LOW>; };
++	};
++
++	gpio_export {
++		compatible = "gpio-export";
++		#size-cells = <0>;
++		cpepower { gpio-export,name = "cpe-pwr"; gpio-export,output = <0>; gpios = <&pio 49 GPIO_ACTIVE_LOW>; };
++		cpesel0 { gpio-export,name = "cpe-sel0"; gpio-export,output = <1>; gpios = <&pio 48 GPIO_ACTIVE_HIGH>; };
++	};
++};
++
++&eth { status = "okay"; };
++
++&gmac0 {
++	phy-mode = "2500base-x";
++	phy-handle = <&ultra_phy0>;
++	status = "okay";
++};
++
++&gmac1 {
++	phy-mode = "internal";
++	phy-handle = <&ultra_phy1>;
++	status = "okay";
++};
++
++&gmac2 {
++	phy-mode = "internal";
++	label = "hnat";
++	status = "okay";
++	fixed-link { speed = <2500>; full-duplex; pause; };
++};
++
++&mdio {
++	#address-cells = <1>;
++	#size-cells = <0>;
++	ultra_phy0: ethernet-phy@b {
++		compatible = "ethernet-phy-id03a2.a411";
++		reg = <11>;
++		reset-gpios = <&pio 42 GPIO_ACTIVE_LOW>;
++		reset-assert-us = <10000>;
++		reset-deassert-us = <10000>;
++		phy-mode = "2500base-x";
++		full-duplex;
++		pause;
++		airoha,phy-handle;
++	};
++	ultra_phy1: ethernet-phy@f {
++		compatible = "ethernet-phy-ieee802.3-c45";
++		reg = <15>;
++		phy-mode = "internal";
++		pinctrl-names = "i2p5gbe-led";
++		pinctrl-0 = <&i2p5gbe_led0_pins>;
++	};
++};
++
++&hnat {
++	mtketh-wan = "eth1";
++	mtketh-lan = "eth0";
++	mtketh-lan2 = "hnat";
++	mtketh-ppd = "hnat";
++	mtketh-max-gmac = <2>;
++	mtketh-ppe-num = <2>;
++	ext-devices-prefix = "usb", "wwan", "rmnet", "eth2", "eth3";
++	status = "okay";
++};
++
++&mmc0 {
++	pinctrl-names = "default", "state_uhs";
++	pinctrl-0 = <&mmc_pins_default>;
++	pinctrl-1 = <&mmc_pins_uhs>;
++	bus-width = <4>;
++	max-frequency = <50000000>;
++	cap-mmc-highspeed;
++	cap-sd-highspeed;
++	vmmc-supply = <&reg_3p3v>;
++	vqmmc-supply = <&reg_3p3v>;
++	non-removable;
++	no-mmc;
++	no-sdio;
++	broken-cd;
++	status = "okay";
++};
++
++&pcie0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&pcie0_pins>;
++	// The 6.12 PCI driver asserts logical 1 then deasserts logical 0.
++	// The running board leaves GPIO38 physically high; ACTIVE_LOW preserves it.
++	wifi-reset-gpios = <&pio 38 GPIO_ACTIVE_LOW>;
++	wifi-reset-msleep = <1000>;
++	wifi-deassert-msleep = <500>;
++	status = "okay";
++};
++
++&pcie1 { status = "disabled"; };
++
++&spi2 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&c2ku_spi2_pins>;
++	#address-cells = <1>;
++	#size-cells = <0>;
++	status = "okay";
++	spi_nor@0 {
++		compatible = "jedec,spi-nor";
++		reg = <0>;
++		spi-max-frequency = <25000000>;
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++			partition@40000 { label = "u-boot-env"; reg = <0x40000 0x10000>; };
++			factory: partition@50000 { label = "Factory"; reg = <0x50000 0x100000>; read-only; };
++			partition@150000 { label = "bdinfo"; reg = <0x150000 0x80000>; read-only; };
++		};
++	};
++};
++
++&pio {
++	c2ku_spi2_pins: c2ku-spi2-pins { mux { function = "spi"; groups = "spi2"; }; };
++	ultra_fan_pins: ultra-fan-pins { mux { function = "pwm"; groups = "pwm1_0"; }; };
++};
++
++&pwm {
++	pinctrl-names = "default";
++	pinctrl-0 = <&ultra_fan_pins>;
++	status = "okay";
++};
++
++&fan {
++		pwms = <&pwm 1 50000>;
++	status = "okay";
++};
++
++&ssusb { status = "okay"; };
++&tphyu3port0 { status = "okay"; };
++&uart0 { pinctrl-names = "default"; pinctrl-0 = <&uart0_pins>; status = "okay"; };
+diff --git a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+index 00d8c60..b890dc8 100644
+--- a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
++++ b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+@@ -8,6 +8,9 @@ mediatek_setup_interfaces()
+ 	local board="$1"
+ 
+ 	case $board in
++	NRadio-C2000MAX-Ultra|NRadio-C2000Ultra|NRadio-C2000MAX-798)
++		ucidef_set_interfaces_lan_wan "eth1 hnat" eth0
++		;;
+ 	abt,asr3000|\
+ 	buffalo,wsr-6000ax8|\
+ 	cmcc,rax3000m|\
+diff --git a/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh b/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+index f3c5e64..7a3ab72 100644
+--- a/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
++++ b/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+@@ -196,6 +196,9 @@ platform_do_upgrade() {
+ 	hiveton,h5000m|\
+ 	huasifei,wh3000-emmc|\
+ 	huasifei,wh3000-pro-emmc|\
++	NRadio-C2000MAX-Ultra|\
++	NRadio-C2000Ultra|\
++	NRadio-C2000MAX-798|\
+ 	sl,3000-emmc|\
+ 	smartrg,sdg-8612|\
+ 	smartrg,sdg-8614|\
+@@ -438,6 +441,9 @@ platform_check_image() {
+ 	creatlentem,clt-r30b1|\
+ 	creatlentem,clt-r30b1-112m|\
+ 	hiveton,h5000m|\
++	NRadio-C2000MAX-Ultra|\
++	NRadio-C2000Ultra|\
++	NRadio-C2000MAX-798|\
+ 	nradio,c8-668gl|\
+ 	zhao,7981r128)
+ 		# tar magic `ustar`
+@@ -479,6 +485,9 @@ platform_copy_config() {
+ 	huasifei,wh3000-emmc|\
+ 	huasifei,wh3000-pro-emmc|\
+ 	jdcloud,re-cp-03|\
++	NRadio-C2000MAX-Ultra|\
++	NRadio-C2000Ultra|\
++	NRadio-C2000MAX-798|\
+ 	sl,3000-emmc|\
+ 	nradio,c8-668gl|\
+ 	smartrg,sdg-8612|\
+diff --git a/target/linux/mediatek/image/filogic-ext.mk b/target/linux/mediatek/image/filogic-ext.mk
+index ab99516..a620c7c 100644
+--- a/target/linux/mediatek/image/filogic-ext.mk
++++ b/target/linux/mediatek/image/filogic-ext.mk
+@@ -342,3 +342,18 @@ define Device/zhao_7981r128-mtkuboot
+   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+ endef
+ TARGET_DEVICES += zhao_7981r128-mtkuboot
++
++define Device/nradio_c2000ultra
++  DEVICE_VENDOR := NRadio
++  DEVICE_MODEL := C2000MAX-Ultra
++  DEVICE_DTS := mt7987a-nradio-c2000ultra
++  DEVICE_DTS_DIR := ../dts-ext
++  SUPPORTED_DEVICES := NRadio-C2000MAX-798 NRadio-C2000MAX-Ultra NRadio-C2000Ultra
++  DEVICE_PACKAGES := kmod-usb3 kmod-usb-net-cdc-ncm kmod-usb-net-huawei-cdc-ncm kmod-usb-serial-option kmod-hwmon-pwmfan kmod-mt798x-2p5g-phy kmod-phy-airoha-en8811h airoha-en8811h-firmware kmod-mt_wifi7 kmod-mt_wifi_osal mtwifi-cfg luci-app-mtwifi-cfg e2fsprogs f2fsck mkf2fs
++  KERNEL_LOADADDR := 0x40080000
++  KERNEL := kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
++  KERNEL_INITRAMFS := kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
++  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
++endef
++TARGET_DEVICES += nradio_c2000ultra
++
+diff --git a/target/linux/mediatek/patches-6.12/197-arm64-dts-mediatek-mt7986-correct-timer-frequency.patch b/target/linux/mediatek/patches-6.12/197-arm64-dts-mediatek-mt7986-correct-timer-frequency.patch
+deleted file mode 100644
+index d4de44f..0000000
+--- a/target/linux/mediatek/patches-6.12/197-arm64-dts-mediatek-mt7986-correct-timer-frequency.patch
++++ /dev/null
+@@ -1,35 +0,0 @@
+-From d99238733debc1e1e8783f794e88adf5f17820f5 Mon Sep 17 00:00:00 2001
+-From: Andrea Pesaresi <andreapesaresi82@gmail.com>
+-Date: Sat, 29 Aug 2026 17:06:18 +0200
+-Subject: [PATCH] arm64: dts: mediatek: mt7986: correct timer frequency
+-
+-The MT7986 architected timer runs at 12,986,200 Hz rather than 13 MHz.
+-Firmware reports 13 MHz through CNTFRQ_EL0, causing the system clock to
+-run slow by about 1062 ppm. This exceeds the kernel's 500 ppm NTP
+-correction limit and leaves clock discipline saturated.
+-
+-The corrected rate comes from MediaTek's downstream OpenWrt feed, where
+-it is applied to both MT7986A and MT7986B. Since upstream mt7986b.dtsi
+-includes mt7986a.dtsi, add it once to the common timer node so the
+-architected timer driver uses the actual counter rate.
+-
+-Fixes: 50137c150f5f ("arm64: dts: mediatek: add basic mt7986 support")
+-Cc: stable@vger.kernel.org
+-Link: https://github.com/mediatek/mtk-openwrt-feeds/commit/6a4c41c41410cd5042ad10c39da6593ba036283c
+-Link: https://github.com/openwrt/openwrt/issues/24789
+-Link: https://lore.kernel.org/r/20260829151955.3661893-1-andreapesaresi82@gmail.com
+-Signed-off-by: Andrea Pesaresi <andreapesaresi82@gmail.com>
+----
+- arch/arm64/boot/dts/mediatek/mt7986a.dtsi | 1 +
+- 1 file changed, 1 insertion(+)
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7986a.dtsi
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a.dtsi
+-@@ -645,6 +645,7 @@
+- 	timer {
+- 		compatible = "arm,armv8-timer";
+- 		interrupt-parent = <&gic>;
+-+		clock-frequency = <12986200>;
+- 		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
+- 			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
+- 			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
+diff --git a/target/linux/mediatek/patches-6.12/863-arm64-dts-mt7986-add-sound-wm8960.patch b/target/linux/mediatek/patches-6.12/863-arm64-dts-mt7986-add-sound-wm8960.patch
+deleted file mode 100644
+index db51bf1..0000000
+--- a/target/linux/mediatek/patches-6.12/863-arm64-dts-mt7986-add-sound-wm8960.patch
++++ /dev/null
+@@ -1,62 +0,0 @@
+-From 1c09b694a1e9378931085e77d834a4d9786a5356 Mon Sep 17 00:00:00 2001
+-From: Maso Huang <maso.huang@mediatek.com>
+-Date: Thu, 7 Sep 2023 10:54:37 +0800
+-Subject: [PATCH] arm64: dts: mt7986: add sound wm8960
+-
+----
+- .../dts/mediatek/mt7986a-rfb-spim-nand.dts    | 39 +++++++++++++++++++
+- 1 files changed, 39 insertions(+)
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-@@ -4,6 +4,36 @@
+- 
+- / {
+- 	compatible = "mediatek,mt7986a-rfb-snand";
+-+
+-+	sound_wm8960 {
+-+		compatible = "mediatek,mt7986-wm8960-sound";
+-+		audio-routing = "Headphone", "HP_L",
+-+				"Headphone", "HP_R",
+-+				"LINPUT1", "AMIC",
+-+				"RINPUT1", "AMIC";
+-+
+-+		status = "okay";
+-+
+-+		platform {
+-+			sound-dai = <&afe>;
+-+		};
+-+
+-+		codec {
+-+			sound-dai = <&wm8960>;
+-+		};
+-+	};
+-+};
+-+
+-+&i2c0 {
+-+	pinctrl-names = "default";
+-+	pinctrl-0 = <&i2c_pins>;
+-+	status = "okay";
+-+
+-+	wm8960: wm8960@1a {
+-+		compatible = "wlf,wm8960";
+-+		#sound-dai-cells = <0>;
+-+		reg = <0x1a>;
+-+	};
+- };
+- 
+- &spi0 {
+-@@ -48,3 +78,13 @@
+- &wifi {
+- 	mediatek,mtd-eeprom = <&factory 0>;
+- };
+-+
+-+&pio {
+-+	i2c_pins: i2c-pins-3-4 {
+-+		mux {
+-+			function = "i2c";
+-+			groups = "i2c";
+-+		};
+-+	};
+-+};
+-+
+diff --git a/target/linux/mediatek/patches-6.12/999-backport-02-v6.14--net-phylink-pass-neg_mode-into-.pcs_get_state-method.patch b/target/linux/mediatek/patches-6.12/999-backport-02-v6.14--net-phylink-pass-neg_mode-into-.pcs_get_state-method.patch
+index feee220..8b44b5d 100644
+--- a/target/linux/mediatek/patches-6.12/999-backport-02-v6.14--net-phylink-pass-neg_mode-into-.pcs_get_state-method.patch
++++ b/target/linux/mediatek/patches-6.12/999-backport-02-v6.14--net-phylink-pass-neg_mode-into-.pcs_get_state-method.patch
+@@ -12,7 +12,6 @@ Tested-by: Maxime Chevallier <maxime.chevallier@bootlin.com>
+ Link: https://patch.msgid.link/E1tXGeT-000Et3-4L@rmk-PC.armlinux.org.uk
+ Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+ ---
+- drivers/net/dsa/an8855.c                                 | 1 +
+  drivers/net/dsa/b53/b53_serdes.c                         | 2 +-
+  drivers/net/dsa/mt7530.c                                 | 2 +-
+  drivers/net/dsa/mv88e6xxx/pcs-6185.c                     | 1 +
+@@ -35,18 +34,6 @@ Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+  include/linux/phylink.h                                  | 8 ++++++--
+  21 files changed, 31 insertions(+), 14 deletions(-)
+ 
+-diff --git a/drivers/net/dsa/an8855.c b/drivers/net/dsa/an8855.c
+-index c184b84..d8b9bb3 100644
+---- a/drivers/net/dsa/an8855.c
+-+++ b/drivers/net/dsa/an8855.c
+-@@ -1693,6 +1693,7 @@ static unsigned int an8855_pcs_inband_caps(struct phylink_pcs *pcs,
+- }
+- 
+- static void an8855_pcs_get_state(struct phylink_pcs *pcs,
+-+				 unsigned int neg_mode,
+- 				 struct phylink_link_state *state)
+- {
+- 	struct an8855_priv *priv = container_of(pcs, struct an8855_priv, pcs);
+ diff --git a/drivers/net/dsa/b53/b53_serdes.c b/drivers/net/dsa/b53/b53_serdes.c
+ index 3f8a491..56a8282 100644
+ --- a/drivers/net/dsa/b53/b53_serdes.c
+diff --git a/target/linux/mediatek/patches-6.12/999-backport-03-v6.14-net-phylink-pass-neg_mode-into-c22-state-decoder.patch b/target/linux/mediatek/patches-6.12/999-backport-03-v6.14-net-phylink-pass-neg_mode-into-c22-state-decoder.patch
+index 7990a44..a346c9e 100644
+--- a/target/linux/mediatek/patches-6.12/999-backport-03-v6.14-net-phylink-pass-neg_mode-into-c22-state-decoder.patch
++++ b/target/linux/mediatek/patches-6.12/999-backport-03-v6.14-net-phylink-pass-neg_mode-into-c22-state-decoder.patch
+@@ -102,12 +102,12 @@ Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+ --- a/drivers/net/pcs/pcs-mtk-lynxi.c
+ +++ b/drivers/net/pcs/pcs-mtk-lynxi.c
+ @@ -149,7 +149,8 @@ static void mtk_pcs_lynxi_get_state(stru
++ 		return;
+  	}
+  
+- 	regmap_read(mpcs->regmap, SGMSYS_PCS_ADVERTISE, &adv);
+ -	phylink_mii_c22_pcs_decode_state(state, bmsr, FIELD_GET(SGMII_LPA, adv));
+-+	phylink_mii_c22_pcs_decode_state(state, neg_mode,
+-+					 bmsr, FIELD_GET(SGMII_LPA, adv));
+++	phylink_mii_c22_pcs_decode_state(state, neg_mode, bmsr,
+++					 FIELD_GET(SGMII_LPA, adv));
+  }
+  
+  static void mtk_sgmii_reset(struct mtk_pcs_lynxi *mpcs)
+diff --git a/target/linux/mediatek/patches-6.12/999-dsa-03-add-an8855-netlink-support.patch b/target/linux/mediatek/patches-6.12/999-dsa-03-add-an8855-netlink-support.patch
+deleted file mode 100644
+index 5d7e87a..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dsa-03-add-an8855-netlink-support.patch
++++ /dev/null
+@@ -1,595 +0,0 @@
+----
+-[v1] net: dsa: an8855: add generic netlink interface for userspace
+-switch tool
+-
+-Add generic netlink interface to support userspace applications to
+-access AN8855 switch registers and PHY registers through netlink
+-sockets.
+----
+-v1: add generic netlink interface for userspace switch tool
+----
+-
+-From a78a0a0d3ded4a9dc1f570289f1c6bc0f272cd81 Mon Sep 17 00:00:00 2001
+-From: "neal.yen" <neal.yen@mediatek.com>
+-Date: Tue, 21 Oct 2025 16:18:39 +0800
+-Subject: [PATCH] net: dsa: add an8855 netlink support for switch app
+-
+-
+-diff --git a/drivers/net/dsa/Makefile b/drivers/net/dsa/Makefile
+-index fd740d0..b329f0d 100644
+---- a/drivers/net/dsa/Makefile
+-+++ b/drivers/net/dsa/Makefile
+-@@ -6,7 +6,8 @@ ifdef CONFIG_NET_DSA_LOOP
+- obj-$(CONFIG_FIXED_PHY)		+= dsa_loop_bdinfo.o
+- endif
+- obj-$(CONFIG_NET_DSA_KS8995) 	+= ks8995.o
+--obj-$(CONFIG_NET_DSA_AN8855)	+= an8855.o
+-+obj-$(CONFIG_NET_DSA_AN8855)    += an8855-dsa.o
+-+an8855-dsa-objs                 := an8855.o an8855_nl.o
+- obj-$(CONFIG_NET_DSA_LANTIQ_GSWIP) += lantiq_gswip.o
+- obj-$(CONFIG_NET_DSA_MT7530)    += mt7530-dsa.o
+- mt7530-dsa-objs                 := mt7530.o mt7530_nl.o
+-diff --git a/drivers/net/dsa/an8855.c b/drivers/net/dsa/an8855.c
+-index e6666d2..c184b84 100644
+---- a/drivers/net/dsa/an8855.c
+-+++ b/drivers/net/dsa/an8855.c
+-@@ -10,15 +10,24 @@
+- #include <linux/gpio/consumer.h>
+- #include <linux/if_bridge.h>
+- #include <linux/iopoll.h>
+-+#include <linux/mfd/airoha-an8855-mfd.h>
+- #include <linux/netdevice.h>
+- #include <linux/of_net.h>
+- #include <linux/of_platform.h>
+- #include <linux/phylink.h>
+- #include <linux/platform_device.h>
+-+#include <linux/proc_fs.h>
+- #include <linux/regmap.h>
+- #include <net/dsa.h>
+- 
+- #include "an8855.h"
+-+#include "an8855_nl.h"
+-+
+-+#define ARHT_CHIP_NAME                  "an8855"
+-+#define ARHT_PROC_DIR                   "air_sw"
+-+#define ARHT_PROC_NODE_DEVICE           "device"
+-+
+-+struct proc_dir_entry *proc_an8855_dsa_dir;
+- 
+- static const struct an8855_mib_desc an8855_mib[] = {
+- 	MIB_DESC(1, AN8855_PORT_MIB_TX_DROP, "TxDrop"),
+-@@ -128,6 +137,65 @@ static int an8855_fdb_cmd(struct an8855_priv *priv, u32 cmd,
+- 	return 0;
+- }
+- 
+-+void an8855_write(struct an8855_priv *priv, u32 reg, u32 val)
+-+{
+-+	regmap_write(priv->regmap, reg, val);
+-+}
+-+
+-+u32 an8855_read(struct an8855_priv *priv, u32 reg)
+-+{
+-+	u32 val;
+-+	int ret;
+-+
+-+	ret = regmap_read(priv->regmap, reg, &val);
+-+	if (ret)
+-+		return ret;
+-+
+-+	return val;
+-+}
+-+
+-+int an8855_phy_cl22_read(struct an8855_priv *priv, int port, int regnum)
+-+{
+-+	struct device *parent = priv->ds->dev->parent;
+-+	struct an8855_mfd_priv *mfd_priv = dev_get_drvdata(parent);
+-+	struct mii_bus *bus = mfd_priv->bus;
+-+
+-+	port += mfd_priv->switch_addr;
+-+	return mdiobus_read(bus, port, regnum);
+-+}
+-+
+-+int an8855_phy_cl22_write(struct an8855_priv *priv, int port, int regnum,
+-+			    u16 val)
+-+{
+-+	struct device *parent = priv->ds->dev->parent;
+-+	struct an8855_mfd_priv *mfd_priv = dev_get_drvdata(parent);
+-+	struct mii_bus *bus = mfd_priv->bus;
+-+
+-+	port += mfd_priv->switch_addr;
+-+	return mdiobus_write(bus, port, regnum, val);
+-+}
+-+
+-+int an8855_phy_cl45_read(struct an8855_priv *priv, int port, int devad, int regnum)
+-+{
+-+	struct device *parent = priv->ds->dev->parent;
+-+	struct an8855_mfd_priv *mfd_priv = dev_get_drvdata(parent);
+-+	struct mii_bus *bus = mfd_priv->bus;
+-+
+-+	port += mfd_priv->switch_addr;
+-+	return mdiobus_c45_read(bus, port, devad, regnum);
+-+}
+-+
+-+int an8855_phy_cl45_write(struct an8855_priv *priv, int port, int devad, int regnum,
+-+		      u16 val)
+-+{
+-+	struct device *parent = priv->ds->dev->parent;
+-+	struct an8855_mfd_priv *mfd_priv = dev_get_drvdata(parent);
+-+	struct mii_bus *bus = mfd_priv->bus;
+-+
+-+	port += mfd_priv->switch_addr;
+-+	return mdiobus_c45_write(bus, port, devad, regnum, val);
+-+}
+-+
+- static void
+- an8855_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
+- {
+-@@ -2152,6 +2220,41 @@ static void an8855_pcs_an_restart(struct phylink_pcs *pcs)
+- 	return;
+- }
+- 
+-+static int an8855_proc_device_read(struct seq_file *seq, void *v)
+-+{
+-+	seq_printf(seq, "%s\n", ARHT_CHIP_NAME);
+-+
+-+	return 0;
+-+}
+-+
+-+static int an8855_proc_device_open(struct inode *inode, struct file *file)
+-+{
+-+	return single_open(file, an8855_proc_device_read, 0);
+-+}
+-+
+-+static const struct proc_ops an8855_proc_device_fops = {
+-+	.proc_open	= an8855_proc_device_open,
+-+	.proc_read	= seq_read,
+-+	.proc_lseek	= seq_lseek,
+-+	.proc_release	= single_release,
+-+};
+-+
+-+static int an8855_proc_device_init(void)
+-+{
+-+	if (!proc_an8855_dsa_dir)
+-+		proc_an8855_dsa_dir = proc_mkdir(ARHT_PROC_DIR, 0);
+-+
+-+	proc_create(ARHT_PROC_NODE_DEVICE, 0400, proc_an8855_dsa_dir,
+-+			&an8855_proc_device_fops);
+-+
+-+	return 0;
+-+}
+-+
+-+static void an8855_proc_device_exit(void)
+-+{
+-+	remove_proc_entry(ARHT_PROC_NODE_DEVICE, 0);
+-+}
+-+
+- static const struct phylink_pcs_ops an8855_pcs_ops = {
+- 	.pcs_inband_caps = an8855_pcs_inband_caps,
+- 	.pcs_get_state = an8855_pcs_get_state,
+-@@ -2275,7 +2378,22 @@ static int an8855_switch_probe(struct platform_device *pdev)
+- 
+- 	dev_set_drvdata(priv->dev, priv);
+- 
+--	return dsa_register_switch(priv->ds);
+-+	ret = dsa_register_switch(priv->ds);
+-+	if (ret) {
+-+		dev_err(priv->dev, "Failed to register DSA switch: %d\n", ret);
+-+		return ret;
+-+	}
+-+
+-+	ret = an8855_nl_init(&priv);
+-+	if (ret) {
+-+		dev_err(priv->dev, "Failed to initialize netlink with DSA: %d\n", ret);
+-+		dsa_unregister_switch(priv->ds);
+-+		return ret;
+-+	}
+-+
+-+	an8855_proc_device_init();
+-+
+-+	return 0;
+- }
+- 
+- static void an8855_switch_remove(struct platform_device *pdev)
+-@@ -2284,6 +2402,8 @@ static void an8855_switch_remove(struct platform_device *pdev)
+- 
+- 	if (priv)
+- 		dsa_unregister_switch(priv->ds);
+-+	an8855_nl_exit();
+-+	an8855_proc_device_exit();
+- }
+- 
+- static const struct of_device_id an8855_switch_of_match[] = {
+-diff --git a/drivers/net/dsa/an8855.h b/drivers/net/dsa/an8855.h
+-index 2462b9d..47bfea7 100644
+---- a/drivers/net/dsa/an8855.h
+-+++ b/drivers/net/dsa/an8855.h
+-@@ -780,4 +780,13 @@ struct an8855_priv {
+- 	bool phy_require_calib;
+- };
+- 
+-+u32 an8855_read(struct an8855_priv *priv, u32 reg);
+-+void an8855_write(struct an8855_priv *priv, u32 reg, u32 val);
+-+int an8855_phy_cl22_read(struct an8855_priv *priv, int port, int regnum);
+-+int an8855_phy_cl22_write(struct an8855_priv *priv, int port, int regnum,
+-+	u16 val);
+-+int an8855_phy_cl45_read(struct an8855_priv *priv, int port, int devad, int regnum);
+-+int an8855_phy_cl45_write(struct an8855_priv *priv, int port, int devad, int regnum,
+-+	u16 val);
+-+
+- #endif /* __AN8855_H */
+-diff --git a/drivers/net/dsa/an8855_nl.c b/drivers/net/dsa/an8855_nl.c
+-new file mode 100644
+-index 0000000..ad4845e
+---- /dev/null
+-+++ b/drivers/net/dsa/an8855_nl.c
+-@@ -0,0 +1,318 @@
+-+// SPDX-License-Identifier: GPL-2.0
+-+/*
+-+ * Copyright (c) 2023 Airoha Inc.
+-+ * Author: Min Yao <min.yao@airoha.com>
+-+ */
+-+
+-+#include <linux/types.h>
+-+#include <linux/kernel.h>
+-+#include <linux/module.h>
+-+#include <linux/init.h>
+-+#include <net/genetlink.h>
+-+#include <linux/of_mdio.h>
+-+#include <linux/phylink.h>
+-+#include <net/dsa.h>
+-+
+-+#include "an8855.h"
+-+#include "an8855_nl.h"
+-+
+-+struct an8855_nl_cmd_item {
+-+	enum an8855_cmd cmd;
+-+	bool require_dev;
+-+	int (*process)(struct genl_info *info);
+-+	u32 nr_required_attrs;
+-+	const enum an8855_attr *required_attrs;
+-+};
+-+
+-+struct an8855_priv *an8855_sw_priv;
+-+
+-+static DEFINE_MUTEX(an8855_devs_lock);
+-+
+-+static void an8855_put(void)
+-+{
+-+	mutex_unlock(&an8855_devs_lock);
+-+}
+-+
+-+static void an8855_lock(void)
+-+{
+-+	mutex_lock(&an8855_devs_lock);
+-+}
+-+
+-+static int an8855_nl_response(struct sk_buff *skb, struct genl_info *info);
+-+
+-+static const struct nla_policy an8855_nl_cmd_policy[] = {
+-+	[AN8855_ATTR_TYPE_MESG] = {.type = NLA_STRING},
+-+	[AN8855_ATTR_TYPE_PHY] = {.type = NLA_S32},
+-+	[AN8855_ATTR_TYPE_REG] = {.type = NLA_U32},
+-+	[AN8855_ATTR_TYPE_VAL] = {.type = NLA_U32},
+-+	[AN8855_ATTR_TYPE_DEV_NAME] = {.type = NLA_S32},
+-+	[AN8855_ATTR_TYPE_DEV_ID] = {.type = NLA_S32},
+-+	[AN8855_ATTR_TYPE_DEVAD] = {.type = NLA_S32},
+-+};
+-+
+-+static const struct genl_ops an8855_nl_ops[] = {
+-+	{
+-+		.cmd = AN8855_CMD_REQUEST,
+-+		.doit = an8855_nl_response,
+-+		.flags = GENL_ADMIN_PERM,
+-+	},
+-+	{
+-+		.cmd = AN8855_CMD_READ,
+-+		.doit = an8855_nl_response,
+-+		.flags = GENL_ADMIN_PERM,
+-+	},
+-+	{
+-+		.cmd = AN8855_CMD_WRITE,
+-+		.doit = an8855_nl_response,
+-+		.flags = GENL_ADMIN_PERM,
+-+	},
+-+};
+-+
+-+static struct genl_family an8855_nl_family = {
+-+	.name = AN8855_DSA_GENL_NAME,
+-+	.version = AN8855_GENL_VERSION,
+-+	.maxattr = AN8855_NR_ATTR_TYPE,
+-+	.ops = an8855_nl_ops,
+-+	.n_ops = ARRAY_SIZE(an8855_nl_ops),
+-+	.policy = an8855_nl_cmd_policy,
+-+};
+-+
+-+static int
+-+an8855_nl_prepare_reply(struct genl_info *info, u8 cmd,
+-+				   struct sk_buff **skbp)
+-+{
+-+	struct sk_buff *msg;
+-+	void *reply;
+-+
+-+	if (!info)
+-+		return -EINVAL;
+-+
+-+	msg = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
+-+	if (!msg)
+-+		return -ENOMEM;
+-+
+-+	/* Construct send-back message header */
+-+	reply = genlmsg_put(msg, info->snd_portid, info->snd_seq,
+-+				&an8855_nl_family, 0, cmd);
+-+	if (!reply) {
+-+		nlmsg_free(msg);
+-+		return -EINVAL;
+-+	}
+-+
+-+	*skbp = msg;
+-+	return 0;
+-+}
+-+
+-+static int
+-+an8855_nl_send_reply(struct sk_buff *skb, struct genl_info *info)
+-+{
+-+	struct genlmsghdr *genlhdr = nlmsg_data(nlmsg_hdr(skb));
+-+	void *reply = genlmsg_data(genlhdr);
+-+
+-+	/* Finalize a generic netlink message (update message header) */
+-+	genlmsg_end(skb, reply);
+-+
+-+	/* reply to a request */
+-+	return genlmsg_reply(skb, info);
+-+}
+-+
+-+static s32
+-+an8855_nl_get_s32(struct genl_info *info, enum an8855_attr attr,
+-+				 s32 defval)
+-+{
+-+	struct nlattr *na;
+-+
+-+	na = info->attrs[attr];
+-+	if (na)
+-+		return nla_get_s32(na);
+-+
+-+	return defval;
+-+}
+-+
+-+static int
+-+an8855_nl_get_u32(struct genl_info *info, enum an8855_attr attr,
+-+				 u32 *val)
+-+{
+-+	struct nlattr *na;
+-+
+-+	na = info->attrs[attr];
+-+	if (na) {
+-+		*val = nla_get_u32(na);
+-+		return 0;
+-+	}
+-+
+-+	return -1;
+-+}
+-+
+-+static int
+-+an8855_nl_reply_read(struct genl_info *info)
+-+{
+-+	struct sk_buff *rep_skb = NULL;
+-+	s32 phy, devad;
+-+	u32 reg = 0;
+-+	int value = 0;
+-+	int ret = 0;
+-+
+-+	phy = an8855_nl_get_s32(info, AN8855_ATTR_TYPE_PHY, -1);
+-+	devad = an8855_nl_get_s32(info, AN8855_ATTR_TYPE_DEVAD, -1);
+-+
+-+	if (an8855_nl_get_u32(info, AN8855_ATTR_TYPE_REG, &reg))
+-+		goto err;
+-+
+-+	ret = an8855_nl_prepare_reply(info, AN8855_CMD_READ, &rep_skb);
+-+	if (ret < 0)
+-+		goto err;
+-+	if (phy >= 0) {
+-+		if (devad < 0)
+-+			value = an8855_phy_cl22_read(an8855_sw_priv, phy, reg);
+-+		else
+-+			value =	an8855_phy_cl45_read(an8855_sw_priv, phy,
+-+						devad, reg);
+-+	} else
+-+		value = an8855_read(an8855_sw_priv, reg);
+-+	ret = nla_put_u32(rep_skb, AN8855_ATTR_TYPE_REG, reg);
+-+	if (ret < 0)
+-+		goto err;
+-+
+-+	ret = nla_put_u32(rep_skb, AN8855_ATTR_TYPE_VAL, value);
+-+	if (ret < 0)
+-+		goto err;
+-+
+-+	return an8855_nl_send_reply(rep_skb, info);
+-+
+-+err:
+-+	if (rep_skb)
+-+		nlmsg_free(rep_skb);
+-+
+-+	return ret;
+-+}
+-+
+-+static int
+-+an8855_nl_reply_write(struct genl_info *info)
+-+{
+-+	struct sk_buff *rep_skb = NULL;
+-+	s32 phy, devad;
+-+	u32 value = 0, reg = 0;
+-+	int ret = 0;
+-+
+-+	phy = an8855_nl_get_s32(info, AN8855_ATTR_TYPE_PHY, -1);
+-+	devad = an8855_nl_get_s32(info, AN8855_ATTR_TYPE_DEVAD, -1);
+-+	if (an8855_nl_get_u32(info, AN8855_ATTR_TYPE_REG, &reg))
+-+		goto err;
+-+
+-+	if (an8855_nl_get_u32(info, AN8855_ATTR_TYPE_VAL, &value))
+-+		goto err;
+-+
+-+	ret = an8855_nl_prepare_reply(info, AN8855_CMD_WRITE, &rep_skb);
+-+	if (ret < 0)
+-+		goto err;
+-+	if (phy >= 0) {
+-+		if (devad < 0)
+-+			an8855_phy_cl22_write(an8855_sw_priv, phy, reg, value);
+-+		else
+-+			an8855_phy_cl45_write(an8855_sw_priv, phy, devad, reg,
+-+					  value);
+-+	} else
+-+		an8855_write(an8855_sw_priv, reg, value);
+-+	ret = nla_put_u32(rep_skb, AN8855_ATTR_TYPE_REG, reg);
+-+	if (ret < 0)
+-+		goto err;
+-+
+-+	ret = nla_put_u32(rep_skb, AN8855_ATTR_TYPE_VAL, value);
+-+	if (ret < 0)
+-+		goto err;
+-+
+-+	return an8855_nl_send_reply(rep_skb, info);
+-+
+-+err:
+-+	if (rep_skb)
+-+		nlmsg_free(rep_skb);
+-+
+-+	return ret;
+-+}
+-+
+-+static const enum an8855_attr an8855_nl_cmd_read_attrs[] = {
+-+	AN8855_ATTR_TYPE_REG
+-+};
+-+
+-+static const enum an8855_attr an8855_nl_cmd_write_attrs[] = {
+-+	AN8855_ATTR_TYPE_REG,
+-+	AN8855_ATTR_TYPE_VAL
+-+};
+-+
+-+static const struct an8855_nl_cmd_item an8855_nl_cmds[] = {
+-+	{
+-+	 .cmd = AN8855_CMD_READ,
+-+	 .require_dev = true,
+-+	 .process = an8855_nl_reply_read,
+-+	 .required_attrs = an8855_nl_cmd_read_attrs,
+-+	 .nr_required_attrs = ARRAY_SIZE(an8855_nl_cmd_read_attrs),
+-+	},
+-+	{
+-+		 .cmd = AN8855_CMD_WRITE,
+-+		 .require_dev = true,
+-+		 .process = an8855_nl_reply_write,
+-+		 .required_attrs = an8855_nl_cmd_write_attrs,
+-+		 .nr_required_attrs = ARRAY_SIZE(an8855_nl_cmd_write_attrs),
+-+	}
+-+};
+-+
+-+static int
+-+an8855_nl_response(struct sk_buff *skb, struct genl_info *info)
+-+{
+-+	struct genlmsghdr *hdr = nlmsg_data(info->nlhdr);
+-+	const struct an8855_nl_cmd_item *cmditem = NULL;
+-+	u32 sat_req_attrs = 0;
+-+	int i, ret;
+-+
+-+	for (i = 0; i < ARRAY_SIZE(an8855_nl_cmds); i++) {
+-+		if (hdr->cmd == an8855_nl_cmds[i].cmd) {
+-+			cmditem = &an8855_nl_cmds[i];
+-+			break;
+-+		}
+-+	}
+-+
+-+	if (!cmditem) {
+-+		pr_info("an8855-nl: unknown cmd %u\n", hdr->cmd);
+-+		return -EINVAL;
+-+	}
+-+
+-+	for (i = 0; i < cmditem->nr_required_attrs; i++) {
+-+		if (info->attrs[cmditem->required_attrs[i]])
+-+			sat_req_attrs++;
+-+	}
+-+
+-+	if (sat_req_attrs != cmditem->nr_required_attrs) {
+-+		pr_info("an8855-nl: missing required attr(s) for cmd %u\n",
+-+			hdr->cmd);
+-+		return -EINVAL;
+-+	}
+-+
+-+	an8855_lock();
+-+	ret = cmditem->process(info);
+-+	an8855_put();
+-+
+-+	return ret;
+-+}
+-+
+-+int
+-+an8855_nl_init(struct an8855_priv **priv)
+-+{
+-+	int ret;
+-+
+-+	pr_info("an8855-nl: genl_register_family_with_ops\n");
+-+
+-+	an8855_sw_priv = *priv;
+-+	ret = genl_register_family(&an8855_nl_family);
+-+	if (ret)
+-+		return ret;
+-+
+-+	return 0;
+-+}
+-+
+-+void
+-+an8855_nl_exit(void)
+-+{
+-+	an8855_sw_priv = NULL;
+-+	genl_unregister_family(&an8855_nl_family);
+-+}
+-diff --git a/drivers/net/dsa/an8855_nl.h b/drivers/net/dsa/an8855_nl.h
+-new file mode 100644
+-index 0000000..f8a462d
+---- /dev/null
+-+++ b/drivers/net/dsa/an8855_nl.h
+-@@ -0,0 +1,43 @@
+-+/* SPDX-License-Identifier: GPL-2.0-only */
+-+/*
+-+ * Copyright (c) 2023 Airoha Inc.
+-+ * Author: Min Yao <min.yao@airoha.com>
+-+ */
+-+
+-+#ifndef _AN8855_NL_H_
+-+#define _AN8855_NL_H_
+-+
+-+#define AN8855_DSA_GENL_NAME "an8855_dsa"
+-+#define AN8855_GENL_VERSION		0x1
+-+
+-+enum an8855_cmd {
+-+	AN8855_CMD_UNSPEC = 0,
+-+	AN8855_CMD_REQUEST,
+-+	AN8855_CMD_REPLY,
+-+	AN8855_CMD_READ,
+-+	AN8855_CMD_WRITE,
+-+
+-+	__AN8855_CMD_MAX,
+-+};
+-+
+-+enum an8855_attr {
+-+	AN8855_ATTR_TYPE_UNSPEC = 0,
+-+	AN8855_ATTR_TYPE_MESG,
+-+	AN8855_ATTR_TYPE_PHY,
+-+	AN8855_ATTR_TYPE_DEVAD,
+-+	AN8855_ATTR_TYPE_REG,
+-+	AN8855_ATTR_TYPE_VAL,
+-+	AN8855_ATTR_TYPE_DEV_NAME,
+-+	AN8855_ATTR_TYPE_DEV_ID,
+-+
+-+	__AN8855_ATTR_TYPE_MAX,
+-+};
+-+
+-+#define AN8855_NR_ATTR_TYPE		(__AN8855_ATTR_TYPE_MAX - 1)
+-+
+-+#ifdef __KERNEL__
+-+int an8855_nl_init(struct an8855_priv **priv);
+-+void an8855_nl_exit(void);
+-+#endif /* __KERNEL__ */
+-+
+-+#endif /* _AN8855_NL_H_ */
+--- 
+-2.45.2
+-
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-12-arm64-dts-mediatek-add-mt7981-pinctrl.patch b/target/linux/mediatek/patches-6.12/999-dts-12-arm64-dts-mediatek-add-mt7981-pinctrl.patch
+deleted file mode 100644
+index 66b8f1d..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-12-arm64-dts-mediatek-add-mt7981-pinctrl.patch
++++ /dev/null
+@@ -1,130 +0,0 @@
+----
+-[v2] arm64: dts: mediatek: add mt7981 pinctrl
+-
+-Create separate mt7981-pinctrl.dtsi file to consolidate basic pinctrl node
+-definitions. Includes pin configurations for SPI, I2C, PWM, PCIe.
+-
+----
+-v2: Move PWM and I2C pins to pinctrl dtsi for better organization.
+-v1: Add and unify basic pinctrl nodes scattered across different dts into unified
+-    mt7981-pinctrl.dtsi file.
+----
+-
+---- /dev/null
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-pinctrl.dtsi
+-@@ -0,0 +1,78 @@
+-+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+-+/*
+-+ * Copyright (C) 2026 MediaTek Inc.
+-+ * Author: Tim.Kuo <Tim.Kuo@mediatek.com>
+-+ */
+-+
+-+#include <dt-bindings/pinctrl/mt65xx.h>
+-+
+-+&pio {
+-+	spi0_flash_pins: spi0-pins {
+-+		mux {
+-+			function = "spi";
+-+			groups = "spi0", "spi0_wp_hold";
+-+		};
+-+		conf-pu {
+-+			pins = "SPI0_CS", "SPI0_HOLD", "SPI0_WP";
+-+			drive-strength = <MTK_DRIVE_4mA>;
+-+			bias-pull-up = <MTK_PUPD_SET_R1R0_11>;
+-+		};
+-+		conf-pd {
+-+			pins = "SPI0_CLK", "SPI0_MOSI", "SPI0_MISO";
+-+			drive-strength = <MTK_DRIVE_4mA>;
+-+			bias-pull-down = <MTK_PUPD_SET_R1R0_11>;
+-+		};
+-+	};
+-+
+-+	spic_pins: spic-pins {
+-+		mux {
+-+			function = "spi";
+-+			groups = "spi1_1";
+-+		};
+-+	};
+-+
+-+	spi2_flash_pins: spi2-pins {
+-+		mux {
+-+			function = "spi";
+-+			groups = "spi2", "spi2_wp_hold";
+-+		};
+-+		conf-pu {
+-+			pins = "SPI2_CS", "SPI2_HOLD", "SPI2_WP";
+-+			drive-strength = <MTK_DRIVE_8mA>;
+-+			bias-pull-up = <MTK_PUPD_SET_R1R0_11>;
+-+		};
+-+		conf-pd {
+-+			pins = "SPI2_CLK", "SPI2_MOSI", "SPI2_MISO";
+-+			drive-strength = <MTK_DRIVE_8mA>;
+-+			bias-pull-down = <MTK_PUPD_SET_R1R0_11>;
+-+		};
+-+	};
+-+
+-+	pwm_pins: pwm-pins {
+-+		mux {
+-+			function = "pwm";
+-+			groups = "pwm0_0";
+-+		};
+-+	};
+-+
+-+	pwm_rgb_pins: pwm-rgb-pins {
+-+		mux {
+-+			function = "pwm";
+-+			groups = "pwm0_0", "pwm1_1", "pwm2";
+-+		};
+-+	};
+-+
+-+	i2c0_0_pins: i2c0-0-pins {
+-+		mux {
+-+			function = "i2c";
+-+			groups = "i2c0_0";
+-+		};
+-+	};
+-+
+-+	i2c0_1_pins: i2c0-1-pins {
+-+		mux {
+-+			function = "i2c";
+-+			groups = "i2c0_1";
+-+		};
+-+	};
+-+};
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-@@ -6,6 +6,7 @@
+- 
+- /dts-v1/;
+- #include "mt7981b.dtsi"
+-+#include "mt7981-pinctrl.dtsi"
+- 
+- / {
+- 	model = "MediaTek MT7981 RFB";
+-@@ -97,26 +98,6 @@
+- 	status = "okay";
+- };
+- 
+--&pio {
+--	spi0_flash_pins: spi0-pins {
+--		mux {
+--			function = "spi";
+--			groups = "spi0", "spi0_wp_hold";
+--		};
+--		conf-pu {
+--			pins = "SPI0_CS", "SPI0_HOLD", "SPI0_WP";
+--			drive-strength = <MTK_DRIVE_8mA>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_11>;
+--		};
+--		conf-pd {
+--			pins = "SPI0_CLK", "SPI0_MOSI", "SPI0_MISO";
+--			drive-strength = <MTK_DRIVE_8mA>;
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_11>;
+--		};
+--	};
+--
+--};
+--
+- &spi0 {
+- 	pinctrl-names = "default";
+- 	pinctrl-0 = <&spi0_flash_pins>;
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-13-arm64-dts-mediatek-add-mt7986-pinctrl.patch b/target/linux/mediatek/patches-6.12/999-dts-13-arm64-dts-mediatek-add-mt7986-pinctrl.patch
+deleted file mode 100644
+index d007f75..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-13-arm64-dts-mediatek-add-mt7986-pinctrl.patch
++++ /dev/null
+@@ -1,420 +0,0 @@
+----
+-[v3] arm64: dts: mediatek: add mt7986 pinctrl
+-
+-Create separate mt7986-pinctrl.dtsi file to consolidate all pinctrl node
+-definitions scattered across different device trees. Includes pin configurations
+-for I2C, MMC, UART, SPI, PCIe, WiFi.
+----
+-v3: Remove pcie_clk/pcie_wake due to GPIO button pin sharing.
+-v2: Fix SPI-related DTS settings (clock parent, NAND/NOR driving, 52MHz
+-    frequency, spidev support).
+-v1: Add and unify all pinctrl nodes scattered across different dts into unified
+-    mt7986-pinctrl.dtsi file.
+----
+-
+---- /dev/null
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986-pinctrl.dtsi
+-@@ -0,0 +1,225 @@
+-+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+-+/*
+-+ * Copyright (C) 2026 MediaTek Inc.
+-+ * Author: Tim.Kuo <Tim.Kuo@mediatek.com>
+-+ */
+-+
+-+#include <dt-bindings/pinctrl/mt65xx.h>
+-+
+-+&pio {
+-+	i2c_pins: i2c-pins {
+-+		mux {
+-+			function = "i2c";
+-+			groups = "i2c";
+-+		};
+-+	};
+-+
+-+	mmc0_pins_default: mmc0-pins {
+-+		mux {
+-+			function = "emmc";
+-+			groups = "emmc_51";
+-+		};
+-+		conf-cmd-dat {
+-+			pins = "EMMC_DATA_0", "EMMC_DATA_1", "EMMC_DATA_2",
+-+			       "EMMC_DATA_3", "EMMC_DATA_4", "EMMC_DATA_5",
+-+			       "EMMC_DATA_6", "EMMC_DATA_7", "EMMC_CMD";
+-+			input-enable;
+-+			drive-strength = <4>;
+-+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+-+		};
+-+		conf-clk {
+-+			pins = "EMMC_CK";
+-+			drive-strength = <6>;
+-+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+-+		};
+-+		conf-ds {
+-+			pins = "EMMC_DSL";
+-+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+-+		};
+-+		conf-rst {
+-+			pins = "EMMC_RSTB";
+-+			drive-strength = <4>;
+-+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+-+		};
+-+	};
+-+
+-+	mmc0_pins_uhs: mmc0-uhs-pins {
+-+		mux {
+-+			function = "emmc";
+-+			groups = "emmc_51";
+-+		};
+-+		conf-cmd-dat {
+-+			pins = "EMMC_DATA_0", "EMMC_DATA_1", "EMMC_DATA_2",
+-+			       "EMMC_DATA_3", "EMMC_DATA_4", "EMMC_DATA_5",
+-+			       "EMMC_DATA_6", "EMMC_DATA_7", "EMMC_CMD";
+-+			input-enable;
+-+			drive-strength = <4>;
+-+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+-+		};
+-+		conf-clk {
+-+			pins = "EMMC_CK";
+-+			drive-strength = <6>;
+-+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+-+		};
+-+		conf-ds {
+-+			pins = "EMMC_DSL";
+-+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+-+		};
+-+		conf-rst {
+-+			pins = "EMMC_RSTB";
+-+			drive-strength = <4>;
+-+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+-+		};
+-+	};
+-+
+-+	pcie_pins: pcie-pins {
+-+		mux {
+-+			function = "pcie";
+-+			groups = "pcie_pereset";
+-+		};
+-+	};
+-+
+-+	pwm_pins: pwm-pins {
+-+		mux {
+-+			function = "pwm";
+-+			groups = "pwm0";
+-+		};
+-+	};
+-+
+-+	spi_nand_pins: spi-nand-pins {
+-+		mux {
+-+			function = "spi";
+-+			groups = "spi0", "spi0_wp_hold";
+-+		};
+-+		conf-pu {
+-+			pins = "SPI2_CS", "SPI2_HOLD", "SPI2_WP";
+-+			drive-strength = <MTK_DRIVE_4mA>;
+-+			bias-disable;	/* bias-disable */
+-+		};
+-+		conf-pd {
+-+			pins = "SPI2_CLK", "SPI2_MOSI", "SPI2_MISO";
+-+			drive-strength = <MTK_DRIVE_4mA>;
+-+			bias-disable;	/* bias-disable */
+-+		};
+-+	};
+-+
+-+	spi_nor_pins: spi-nand-pins {
+-+		mux {
+-+			function = "spi";
+-+			groups = "spi0", "spi0_wp_hold";
+-+		};
+-+		conf-pu {
+-+			pins = "SPI2_CS", "SPI2_HOLD", "SPI2_WP";
+-+			drive-strength = <MTK_DRIVE_8mA>;
+-+			bias-disable;	/* bias-disable */
+-+		};
+-+		conf-pd {
+-+			pins = "SPI2_CLK", "SPI2_MOSI", "SPI2_MISO";
+-+			drive-strength = <MTK_DRIVE_8mA>;
+-+			bias-disable;	/* bias-disable */
+-+		};
+-+	};
+-+
+-+	spic_pins: spic-pins-29-to-32 {
+-+		mux {
+-+			function = "spi";
+-+			groups = "spi1_2";
+-+		};
+-+	};
+-+
+-+	uart1_pins: uart1-pins {
+-+		mux {
+-+			function = "uart";
+-+			groups = "uart1";
+-+		};
+-+	};
+-+
+-+	uart1_tx_rx_pins: uart1-tx-rx-pins {
+-+		mux {
+-+			function = "uart";
+-+			groups = "uart1_rx_tx";
+-+		};
+-+	};
+-+
+-+	uart2_pins: uart2-pins {
+-+		mux {
+-+			function = "uart";
+-+			groups = "uart2";
+-+		};
+-+	};
+-+
+-+	usb_ngff_pins: usb-ngff-pins {
+-+		ngff-gnss-off-conf {
+-+			pins = "GPIO_6";
+-+			drive-strength = <8>;
+-+			mediatek,pull-up-adv = <1>;
+-+		};
+-+		ngff-pe-rst-conf {
+-+			pins = "GPIO_7";
+-+			drive-strength = <8>;
+-+			mediatek,pull-up-adv = <1>;
+-+		};
+-+		ngff-wwan-off-conf {
+-+			pins = "GPIO_8";
+-+			drive-strength = <8>;
+-+			mediatek,pull-up-adv = <1>;
+-+		};
+-+		ngff-pwr-off-conf {
+-+			pins = "GPIO_9";
+-+			drive-strength = <8>;
+-+			mediatek,pull-up-adv = <1>;
+-+		};
+-+		ngff-rst-conf {
+-+			pins = "GPIO_10";
+-+			drive-strength = <8>;
+-+			mediatek,pull-up-adv = <1>;
+-+		};
+-+		ngff-coex-conf {
+-+			pins = "SPI1_CS";
+-+			drive-strength = <8>;
+-+			mediatek,pull-up-adv = <1>;
+-+		};
+-+	};
+-+
+-+	wf_2g_5g_pins: wf_2g_5g-pins {
+-+		mux {
+-+			function = "wifi";
+-+			groups = "wf_2g", "wf_5g";
+-+		};
+-+		conf {
+-+			pins = "WF0_HB1", "WF0_HB2", "WF0_HB3", "WF0_HB4",
+-+			       "WF0_HB0", "WF0_HB0_B", "WF0_HB5", "WF0_HB6",
+-+			       "WF0_HB7", "WF0_HB8", "WF0_HB9", "WF0_HB10",
+-+			       "WF0_TOP_CLK", "WF0_TOP_DATA", "WF1_HB1",
+-+			       "WF1_HB2", "WF1_HB3", "WF1_HB4", "WF1_HB0",
+-+			       "WF1_HB5", "WF1_HB6", "WF1_HB7", "WF1_HB8",
+-+			       "WF1_TOP_CLK", "WF1_TOP_DATA";
+-+			drive-strength = <MTK_DRIVE_4mA>;
+-+		};
+-+	};
+-+
+-+	wf_dbdc_pins: wf_dbdc-pins {
+-+		mux {
+-+			function = "wifi";
+-+			groups = "wf_dbdc";
+-+		};
+-+		conf {
+-+			pins = "WF0_HB1", "WF0_HB2", "WF0_HB3", "WF0_HB4",
+-+			       "WF0_HB0", "WF0_HB0_B", "WF0_HB5", "WF0_HB6",
+-+			       "WF0_HB7", "WF0_HB8", "WF0_HB9", "WF0_HB10",
+-+			       "WF0_TOP_CLK", "WF0_TOP_DATA", "WF1_HB1",
+-+			       "WF1_HB2", "WF1_HB3", "WF1_HB4", "WF1_HB0",
+-+			       "WF1_HB5", "WF1_HB6", "WF1_HB7", "WF1_HB8",
+-+			       "WF1_TOP_CLK", "WF1_TOP_DATA";
+-+			drive-strength = <MTK_DRIVE_4mA>;
+-+		};
+-+	};
+-+
+-+	wf_led_pins: wf-led-pins {
+-+		mux {
+-+			function = "led";
+-+			groups = "wifi_led";
+-+		};
+-+	};
+-+};
+-+
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb.dtsi
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb.dtsi
+-@@ -8,7 +8,7 @@
+- #include <dt-bindings/gpio/gpio.h>
+- #include <dt-bindings/pinctrl/mt65xx.h>
+- #include "mt7986a.dtsi"
+--
+-+#include "mt7986-pinctrl.dtsi"
+- / {
+- 	model = "MediaTek MT7986a RFB";
+- 	compatible = "mediatek,mt7986a-rfb";
+-@@ -141,145 +141,6 @@
+- 	status = "okay";
+- };
+- 
+--&pio {
+--	mmc0_pins_default: mmc0-pins {
+--		mux {
+--			function = "emmc";
+--			groups = "emmc_51";
+--		};
+--		conf-cmd-dat {
+--			pins = "EMMC_DATA_0", "EMMC_DATA_1", "EMMC_DATA_2",
+--			       "EMMC_DATA_3", "EMMC_DATA_4", "EMMC_DATA_5",
+--			       "EMMC_DATA_6", "EMMC_DATA_7", "EMMC_CMD";
+--			input-enable;
+--			drive-strength = <MTK_DRIVE_4mA>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;	/* pull-up 10K */
+--		};
+--		conf-clk {
+--			pins = "EMMC_CK";
+--			drive-strength = <MTK_DRIVE_6mA>;
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;	/* pull-down 50K */
+--		};
+--		conf-ds {
+--			pins = "EMMC_DSL";
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;	/* pull-down 50K */
+--		};
+--		conf-rst {
+--			pins = "EMMC_RSTB";
+--			drive-strength = <MTK_DRIVE_4mA>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;	/* pull-up 10K */
+--		};
+--	};
+--
+--	mmc0_pins_uhs: mmc0-uhs-pins {
+--		mux {
+--			function = "emmc";
+--			groups = "emmc_51";
+--		};
+--		conf-cmd-dat {
+--			pins = "EMMC_DATA_0", "EMMC_DATA_1", "EMMC_DATA_2",
+--			       "EMMC_DATA_3", "EMMC_DATA_4", "EMMC_DATA_5",
+--			       "EMMC_DATA_6", "EMMC_DATA_7", "EMMC_CMD";
+--			input-enable;
+--			drive-strength = <MTK_DRIVE_4mA>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;	/* pull-up 10K */
+--		};
+--		conf-clk {
+--			pins = "EMMC_CK";
+--			drive-strength = <MTK_DRIVE_6mA>;
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;	/* pull-down 50K */
+--		};
+--		conf-ds {
+--			pins = "EMMC_DSL";
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;	/* pull-down 50K */
+--		};
+--		conf-rst {
+--			pins = "EMMC_RSTB";
+--			drive-strength = <MTK_DRIVE_4mA>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;	/* pull-up 10K */
+--		};
+--	};
+--
+--	pcie_pins: pcie-pins {
+--		mux {
+--			function = "pcie";
+--			groups = "pcie_clk", "pcie_wake", "pcie_pereset";
+--		};
+--	};
+--
+--	spic_pins_g2: spic-pins-29-to-32 {
+--		mux {
+--			function = "spi";
+--			groups = "spi1_2";
+--		};
+--	};
+--
+--	spi_flash_pins: spi-flash-pins-33-to-38 {
+--		mux {
+--			function = "spi";
+--			groups = "spi0", "spi0_wp_hold";
+--		};
+--		conf-pu {
+--			pins = "SPI2_CS", "SPI2_HOLD", "SPI2_WP";
+--			drive-strength = <MTK_DRIVE_8mA>;
+--			bias-disable;	/* bias-disable */
+--		};
+--		conf-pd {
+--			pins = "SPI2_CLK", "SPI2_MOSI", "SPI2_MISO";
+--			drive-strength = <MTK_DRIVE_8mA>;
+--			bias-disable;	/* bias-disable */
+--		};
+--	};
+--
+--	uart1_pins: uart1-pins {
+--		mux {
+--			function = "uart";
+--			groups = "uart1";
+--		};
+--	};
+--
+--	uart2_pins: uart2-pins {
+--		mux {
+--			function = "uart";
+--			groups = "uart2";
+--		};
+--	};
+--
+--	wf_2g_5g_pins: wf_2g_5g-pins {
+--		mux {
+--			function = "wifi";
+--			groups = "wf_2g", "wf_5g";
+--		};
+--		conf {
+--			pins = "WF0_HB1", "WF0_HB2", "WF0_HB3", "WF0_HB4",
+--			       "WF0_HB0", "WF0_HB0_B", "WF0_HB5", "WF0_HB6",
+--			       "WF0_HB7", "WF0_HB8", "WF0_HB9", "WF0_HB10",
+--			       "WF0_TOP_CLK", "WF0_TOP_DATA", "WF1_HB1",
+--			       "WF1_HB2", "WF1_HB3", "WF1_HB4", "WF1_HB0",
+--			       "WF1_HB5", "WF1_HB6", "WF1_HB7", "WF1_HB8",
+--			       "WF1_TOP_CLK", "WF1_TOP_DATA";
+--			drive-strength = <MTK_DRIVE_4mA>;
+--		};
+--	};
+--
+--	wf_dbdc_pins: wf_dbdc-pins {
+--		mux {
+--			function = "wifi";
+--			groups = "wf_dbdc";
+--		};
+--		conf {
+--			pins = "WF0_HB1", "WF0_HB2", "WF0_HB3", "WF0_HB4",
+--			       "WF0_HB0", "WF0_HB0_B", "WF0_HB5", "WF0_HB6",
+--			       "WF0_HB7", "WF0_HB8", "WF0_HB9", "WF0_HB10",
+--			       "WF0_TOP_CLK", "WF0_TOP_DATA", "WF1_HB1",
+--			       "WF1_HB2", "WF1_HB3", "WF1_HB4", "WF1_HB0",
+--			       "WF1_HB5", "WF1_HB6", "WF1_HB7", "WF1_HB8",
+--			       "WF1_TOP_CLK", "WF1_TOP_DATA";
+--			drive-strength = <MTK_DRIVE_4mA>;
+--		};
+--	};
+--};
+--
+- &spi0 {
+- 	pinctrl-names = "default";
+- 	pinctrl-0 = <&spi_flash_pins>;
+-@@ -290,7 +151,7 @@
+- 
+- &spi1 {
+- 	pinctrl-names = "default";
+--	pinctrl-0 = <&spic_pins_g2>;
+-+	pinctrl-0 = <&spic_pins>;
+- 	status = "okay";
+- 
+- 	proslic_spi: proslic_spi@0 {
+---- a/arch/arm64/boot/dts/mediatek/mt7986a.dtsi
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a.dtsi
+-@@ -9,7 +9,8 @@
+- #include <dt-bindings/clock/mt7986-clk.h>
+- #include <dt-bindings/reset/mt7986-resets.h>
+- #include <dt-bindings/phy/phy.h>
+--
+-+#include <dt-bindings/gpio/gpio.h>
+-+#include <dt-bindings/input/input.h>
+- / {
+- 	compatible = "mediatek,mt7986a";
+- 	interrupt-parent = <&gic>;
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-00-change-mt7981-nand-dts-to-full-UBI.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-00-change-mt7981-nand-dts-to-full-UBI.patch
+deleted file mode 100644
+index 5f375f3..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-00-change-mt7981-nand-dts-to-full-UBI.patch
++++ /dev/null
+@@ -1,101 +0,0 @@
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nand.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nand.dtso
+-@@ -7,7 +7,8 @@
+- 
+- 	fragment@0 {
+- 		target = <&chosen>;
+--		rootdisk-spim-nand = <&ubi_rootdisk>;
+-+		rootdisk-spim-nand = <&ubi_root>;
+-+		bootargs-append = " ubi.block=0,firmware root=/dev/fit0 rootwait";
+- 	};
+- 
+- 	fragment@1 {
+-@@ -17,10 +18,10 @@
+- 			#address-cells = <1>;
+- 			#size-cells = <0>;
+- 
+--			spi_nand: spi_nand@1 {
+-+			flash@0 {
+- 				compatible = "spi-nand";
+--				reg = <1>;
+--				spi-max-frequency = <10000000>;
+-+				reg = <0>;
+-+				spi-max-frequency = <52000000>;
+- 				spi-tx-bus-width = <4>;
+- 				spi-rx-bus-width = <4>;
+- 
+-@@ -31,32 +32,45 @@
+- 
+- 					partition@0 {
+- 						label = "BL2";
+--						reg = <0x00000 0x0100000>;
+-+						reg = <0x00000 0x0200000>;
+- 						read-only;
+- 					};
+- 
+--					partition@100000 {
+--						label = "u-boot-env";
+--						reg = <0x0100000 0x0080000>;
+--					};
+--
+--					factory: partition@180000 {
+--						label = "Factory";
+--						reg = <0x180000 0x0200000>;
+--					};
+--
+--					partition@380000 {
+--						label = "FIP";
+--						reg = <0x380000 0x0200000>;
+--					};
+--
+--					partition@580000 {
+-+					partition@200000 {
+- 						label = "ubi";
+--						reg = <0x580000 0x4000000>;
+-+						reg = <0x0200000 0x7e00000>;
+- 						compatible = "linux,ubi";
+- 
+- 						volumes {
+--							ubi_rootdisk: ubi-volume-fit {
+-+							ubi-volume-ubootenv {
+-+								volname = "ubootenv";
+-+								nvmem-layout {
+-+									compatible = "u-boot,env-redundant-bool";
+-+								};
+-+							};
+-+
+-+							ubi-volume-ubootenv2 {
+-+								volname = "ubootenv2";
+-+								nvmem-layout {
+-+									compatible = "u-boot,env-redundant-bool";
+-+								};
+-+							};
+-+
+-+							ubi_factory: ubi-volume-factory {
+-+								volname = "factory";
+-+
+-+								nvmem-layout {
+-+									compatible = "fixed-layout";
+-+									#address-cells = <1>;
+-+									#size-cells = <1>;
+-+
+-+									eeprom_wmac: eeprom@0 {
+-+										reg = <0x0 0x1000>;
+-+									};
+-+								};
+-+							};
+-+
+-+							ubi_root: ubi-volume-fit {
+- 								volname = "fit";
+- 							};
+- 						};
+-@@ -69,7 +83,8 @@
+- 	fragment@2 {
+- 		target = <&wifi>;
+- 		__overlay__ {
+--			mediatek,mtd-eeprom = <&factory 0x0>;
+-+			nvmem-cell-names = "eeprom";
+-+			nvmem-cells = <&eeprom_wmac>;
+- 			status = "okay";
+- 		};
+- 	};
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-03-add-pwm-pin-and-devices.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-03-add-pwm-pin-and-devices.patch
+deleted file mode 100644
+index 7d0f045..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-03-add-pwm-pin-and-devices.patch
++++ /dev/null
+@@ -1,77 +0,0 @@
+----
+-[v3] arm64: dts: mt7981 rfb: add pwm pin and devices
+-Add PWM pin configuration and PWM LED device support for MT7981 RFB including
+-single PWM LED and RGB multi-color LED for system status indicators.
+----
+-v3: Move PWM pins to mt7981-pinctrl.dtsi for better organization.
+-v2: Remove redundant DTS properties for cleaner code.
+-v1: Move openwrt-master files to openwrt-25.12 branch after OpenWrt official
+-    25.12 branch release.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-@@ -26,6 +26,44 @@
+- 		device_type = "memory";
+- 	};
+- 
+-+ 	pwm_led: pwm-led {
+-+		compatible = "pwm-leds";
+-+		status = "disabled";
+-+
+-+		led {
+-+			pwms = <&pwm 0 50000 0>;
+-+			max-brightness = <255>;
+-+			active-low;
+-+			linux,default-trigger = "default-on";
+-+		};
+-+	};
+-+
+-+	pwm_rgb: pwm-rgb {
+-+		compatible = "pwm-leds-multicolor";
+-+		status = "disabled";
+-+
+-+		multi-led {
+-+			color = <LED_COLOR_ID_RGB>;
+-+			function = LED_FUNCTION_INDICATOR;
+-+			max-brightness = <255>;
+-+
+-+			led-red {
+-+				pwms = <&pwm 1 50000>;
+-+				color = <LED_COLOR_ID_RED>;
+-+			};
+-+
+-+			led-green {
+-+				pwms = <&pwm 2 50000>;
+-+				color = <LED_COLOR_ID_GREEN>;
+-+			};
+-+
+-+			led-blue {
+-+				pwms = <&pwm 3 50000>;
+-+				color = <LED_COLOR_ID_BLUE>;
+-+			};
+-+		};
+-+	};
+-+
+- 	reg_3p3v: regulator-3p3v {
+- 		compatible = "regulator-fixed";
+- 		regulator-name = "fixed-3.3V";
+-@@ -151,6 +189,18 @@
+- 	};
+- };
+- 
+-+&pwm_led {
+-+ 	pinctrl-names = "default";
+-+	pinctrl-0 = <&pwm_pins>;
+-+	status = "okay";
+-+};
+-+
+-+&pwm_rgb {
+-+	pinctrl-names = "default";
+-+	pinctrl-0 = <&pwm_rgb_pins>;
+-+	status = "disabled";
+-+};
+-+
+- &xhci {
+- 	vusb33-supply = <&reg_3p3v>;
+- 	vbus-supply = <&reg_5v>;
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-04-add-i2c-pin-and-devices.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-04-add-i2c-pin-and-devices.patch
+deleted file mode 100644
+index 3b43553..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-04-add-i2c-pin-and-devices.patch
++++ /dev/null
+@@ -1,32 +0,0 @@
+----
+-[v2] arm64: dts: mt7981 rfb: add i2c pin and devices
+-
+-Add I2C pin configuration and I2C device support for MT7981 RFB including various
+-peripherals for sensor and peripheral connectivity.
+----
+-v2: Move I2C pins to mt7981-pinctrl.dtsi for better organization.
+-v1: Move openwrt-master files to openwrt-25.12 branch after OpenWrt official
+-    25.12 branch release.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-@@ -120,6 +120,18 @@
+- 	};
+- };
+- 
+-+&i2c0 {
+-+	pinctrl-names = "default";
+-+	pinctrl-0 = <&i2c0_1_pins>;
+-+	status = "okay";
+-+
+-+	at24c32: at24c32@57 {
+-+		compatible = "atmel,24c32";
+-+		reg = <0x57>;
+-+		status = "disabled";
+-+	};
+-+};
+-+
+- &mdio_bus {
+- 	switch: switch@1f {
+- 		compatible = "mediatek,mt7531";
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-05-arm64-dts-mediatek-add-gpio-keys-debounce.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-05-arm64-dts-mediatek-add-gpio-keys-debounce.patch
+deleted file mode 100644
+index 3f5f1fc..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-05-arm64-dts-mediatek-add-gpio-keys-debounce.patch
++++ /dev/null
+@@ -1,43 +0,0 @@
+----
+-[v1] arm64: dts: mediatek: add gpio keys debounce
+-
+-Add debounce configuration for GPIO keys (WPS and reset buttons) on MT7981 RFB
+-to prevent spurious key press detection.
+----
+-v1: Move openwrt-master files to openwrt-25.12 branch after OpenWrt official
+-    25.12 branch release.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-@@ -50,11 +50,13 @@
+- 			label = "reset";
+- 			linux,code = <KEY_RESTART>;
+- 			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+-+			debounce-interval = <10>;
+- 		};
+- 		wps {
+- 			label = "wps";
+- 			linux,code = <KEY_WPS_BUTTON>;
+- 			gpios = <&pio 0 GPIO_ACTIVE_HIGH>;
+-+			debounce-interval = <10>;
+- 		};
+- 	};
+- };
+---- a/arch/arm64/boot/dts/mediatek/mt7981b-cudy-wr3000-v1.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981b-cudy-wr3000-v1.dts
+-@@ -23,12 +23,14 @@
+- 			label = "WPS";
+- 			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+- 			linux,code = <KEY_WPS_BUTTON>;
+-+			debounce-interval = <10>;
+- 		};
+- 
+- 		key-reset {
+- 			label = "RESET";
+- 			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+- 			linux,code = <KEY_RESTART>;
+-+			debounce-interval = <10>;
+- 		};
+- 	};
+- 
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-05-arm64-dts-mt7981-add-mtkhnat-driver-support.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-05-arm64-dts-mt7981-add-mtkhnat-driver-support.patch
+deleted file mode 100644
+index e04fd69..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-05-arm64-dts-mt7981-add-mtkhnat-driver-support.patch
++++ /dev/null
+@@ -1,51 +0,0 @@
+-From cc060e552eff25f75d65d8c6194b9b1a08a62027 Mon Sep 17 00:00:00 2001
+-From: "chak-kei.lam" <chak-kei.lam@mediatek.com>
+-Date: Fri, 16 Jan 2026 14:28:47 +0800
+-Subject: [PATCH] arm64: dts: mt7981: add mtkhnat driver support
+-
+----
+- arch/arm64/boot/dts/mediatek/mt7981-rfb.dts | 7 +++++++
+- arch/arm64/boot/dts/mediatek/mt7981b.dtsi   | 9 +++++++++
+- 2 files changed, 16 insertions(+)
+-
+-diff --git a/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts b/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-index 8fba575..ccf1c87 100644
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-@@ -121,6 +121,13 @@ gmac1: mac@1 {
+- 	};
+- };
+- 
+-+&hnat {
+-+	mtketh-wan = "eth1";
+-+	mtketh-lan = "lan";
+-+	mtketh-max-gmac = <2>;
+-+	status = "okay";
+-+};
+-+
+- &i2c0 {
+- 	pinctrl-names = "default";
+- 	pinctrl-0 = <&i2c0_1_pins>;
+-diff --git a/arch/arm64/boot/dts/mediatek/mt7981b.dtsi b/arch/arm64/boot/dts/mediatek/mt7981b.dtsi
+-index e53b62a..b9eed64 100644
+---- a/arch/arm64/boot/dts/mediatek/mt7981b.dtsi
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981b.dtsi
+-@@ -521,6 +521,15 @@ wdma: wdma@15104800 {
+- 			      <0 0x15104c00 0 0x400>;
+- 		};
+- 
+-+		hnat: hnat@15000000 {
+-+			compatible = "mediatek,mtk-hnat_v4";
+-+			reg = <0 0x15100000 0 0x80000>;
+-+			resets = <&ethsys 0>;
+-+			reset-names = "mtketh";
+-+			mtketh-soc = <&eth>;
+-+			status = "disabled";
+-+		};
+-+
+- 		ap2woccif: ap2woccif@151a5000 {
+- 			compatible = "mediatek,ap2woccif";
+- 			reg = <0 0x151a5000 0 0x1000>,
+--- 
+-2.45.2
+-
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-06-arm64-dts-mediatek-add-wifi-device-node.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-06-arm64-dts-mediatek-add-wifi-device-node.patch
+deleted file mode 100644
+index 72178dd..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-06-arm64-dts-mediatek-add-wifi-device-node.patch
++++ /dev/null
+@@ -1,20 +0,0 @@
+----
+-[v1] arm64: dts: mediatek: mt7981: add wifi device node
+-
+-Enable WiFi device node configuration for MT7981 RFB.
+----
+-v1: Initial release for the openwrt-25.12 branch.
+----
+-
+-Index: linux-6.12.65/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-===================================================================
+---- linux-6.12.65.orig/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-+++ linux-6.12.65/arch/arm64/boot/dts/mediatek/mt7981-rfb.dts
+-@@ -263,3 +263,7 @@
+- &watchdog {
+- 	status = "okay";
+- };
+-+
+-+&wifi {
+-+	status = "okay";
+-+};
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-08-arm64-dts-mediatek-add-last-partition-size-extend-to-end-support.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-08-arm64-dts-mediatek-add-last-partition-size-extend-to-end-support.patch
+deleted file mode 100644
+index 322e509..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7981-rfb-08-arm64-dts-mediatek-add-last-partition-size-extend-to-end-support.patch
++++ /dev/null
+@@ -1,48 +0,0 @@
+----
+-[v1] arm64: dts: mediatek: mt7981: Add mtd partition extend to end support
+-Add "mtd-extend-to-end" in mt7981 spim nand/nor related dts.
+-Partition with "mtd-extend-to-end" will extend to the end of
+-parent partiton and note that the size of partition in reg must be
+-set to 0 like reg = <0x0200000 0x0>.
+----
+-v1: Add mtd partition extend to end support.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nand-nmbm.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nand-nmbm.dtso
+-@@ -53,8 +53,9 @@
+- 
+- 			partition@780000 {
+- 				label = "ubi";
+--				reg = <0x580000 0x4000000>;
+-+				reg = <0x580000 0x0>;
+- 				compatible = "linux,ubi";
+-+				mtd-extend-to-end;
+- 
+- 				volumes {
+- 					ubi_rootfs: ubi-volume-fit {
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nand.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nand.dtso
+-@@ -38,8 +38,9 @@
+- 
+- 					partition@200000 {
+- 						label = "ubi";
+--						reg = <0x0200000 0x7e00000>;
+-+						reg = <0x0200000 0x0>;
+- 						compatible = "linux,ubi";
+-+						mtd-extend-to-end;
+- 
+- 						volumes {
+- 							ubi-volume-ubootenv {
+---- a/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nor.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7981-rfb-spim-nor.dtso
+-@@ -44,7 +44,8 @@
+- 				};
+- 				nor_rootfs: partition@180000 {
+- 					label = "firmware";
+--					reg = <0x180000 0x1e80000>;
+-+					reg = <0x180000 0x0>;
+-+					mtd-extend-to-end;
+- 				};
+- 			};
+- 		};
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-01-arm64-dts-mediaek-refactor-pinctrl-node.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-01-arm64-dts-mediaek-refactor-pinctrl-node.patch
+deleted file mode 100644
+index f320500..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-01-arm64-dts-mediaek-refactor-pinctrl-node.patch
++++ /dev/null
+@@ -1,160 +0,0 @@
+----
+-[v1] arm64: dts: mt7986a rfb: refactor pinctrl node
+-
+-Remove pinctrl node definitions from individual DTS files and consolidate into
+-mt7986-pinctrl.dtsi for better organization and maintainability.
+----
+-v1: Initial release for the openwrt-25.12 branch.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-@@ -78,13 +78,3 @@
+- &wifi {
+- 	mediatek,mtd-eeprom = <&factory 0>;
+- };
+--
+--&pio {
+--	i2c_pins: i2c-pins-3-4 {
+--		mux {
+--			function = "i2c";
+--			groups = "i2c";
+--		};
+--	};
+--};
+--
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb.dts
+-@@ -178,132 +178,6 @@
+- 	status = "okay";
+- };
+- 
+--&pio {
+--	mmc0_pins_default: mmc0-pins {
+--		mux {
+--			function = "emmc";
+--			groups = "emmc_51";
+--		};
+--		conf-cmd-dat {
+--			pins = "EMMC_DATA_0", "EMMC_DATA_1", "EMMC_DATA_2",
+--			       "EMMC_DATA_3", "EMMC_DATA_4", "EMMC_DATA_5",
+--			       "EMMC_DATA_6", "EMMC_DATA_7", "EMMC_CMD";
+--			input-enable;
+--			drive-strength = <4>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+--		};
+--		conf-clk {
+--			pins = "EMMC_CK";
+--			drive-strength = <6>;
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+--		};
+--		conf-ds {
+--			pins = "EMMC_DSL";
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+--		};
+--		conf-rst {
+--			pins = "EMMC_RSTB";
+--			drive-strength = <4>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+--		};
+--	};
+--
+--	mmc0_pins_uhs: mmc0-uhs-pins {
+--		mux {
+--			function = "emmc";
+--			groups = "emmc_51";
+--		};
+--		conf-cmd-dat {
+--			pins = "EMMC_DATA_0", "EMMC_DATA_1", "EMMC_DATA_2",
+--			       "EMMC_DATA_3", "EMMC_DATA_4", "EMMC_DATA_5",
+--			       "EMMC_DATA_6", "EMMC_DATA_7", "EMMC_CMD";
+--			input-enable;
+--			drive-strength = <4>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+--		};
+--		conf-clk {
+--			pins = "EMMC_CK";
+--			drive-strength = <6>;
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+--		};
+--		conf-ds {
+--			pins = "EMMC_DSL";
+--			bias-pull-down = <MTK_PUPD_SET_R1R0_10>; /* pull-down 50K */
+--		};
+--		conf-rst {
+--			pins = "EMMC_RSTB";
+--			drive-strength = <4>;
+--			bias-pull-up = <MTK_PUPD_SET_R1R0_01>; /* pull-up 10K */
+--		};
+--	};
+--
+--	pcie_pins: pcie-pins {
+--		mux {
+--			function = "pcie";
+--			groups = "pcie_clk", "pcie_wake", "pcie_pereset";
+--		};
+--	};
+--
+--	spi_flash_pins: spi-flash-pins {
+--		mux {
+--			function = "spi";
+--			groups = "spi0", "spi0_wp_hold";
+--		};
+--	};
+--
+--	spic_pins: spic-pins {
+--		mux {
+--			function = "spi";
+--			groups = "spi1_2";
+--		};
+--	};
+--
+--	uart1_pins: uart1-pins {
+--		mux {
+--			function = "uart";
+--			groups = "uart1";
+--		};
+--	};
+--
+--	uart2_pins: uart2-pins {
+--		mux {
+--			function = "uart";
+--			groups = "uart2";
+--		};
+--	};
+--
+--	wf_2g_5g_pins: wf-2g-5g-pins {
+--		mux {
+--			function = "wifi";
+--			groups = "wf_2g", "wf_5g";
+--		};
+--		conf {
+--			pins = "WF0_HB1", "WF0_HB2", "WF0_HB3", "WF0_HB4",
+--			       "WF0_HB0", "WF0_HB0_B", "WF0_HB5", "WF0_HB6",
+--			       "WF0_HB7", "WF0_HB8", "WF0_HB9", "WF0_HB10",
+--			       "WF0_TOP_CLK", "WF0_TOP_DATA", "WF1_HB1",
+--			       "WF1_HB2", "WF1_HB3", "WF1_HB4", "WF1_HB0",
+--			       "WF1_HB5", "WF1_HB6", "WF1_HB7", "WF1_HB8",
+--			       "WF1_TOP_CLK", "WF1_TOP_DATA";
+--			drive-strength = <4>;
+--		};
+--	};
+--
+--	wf_dbdc_pins: wf-dbdc-pins {
+--		mux {
+--			function = "wifi";
+--			groups = "wf_dbdc";
+--		};
+--		conf {
+--			pins = "WF0_HB1", "WF0_HB2", "WF0_HB3", "WF0_HB4",
+--			       "WF0_HB0", "WF0_HB0_B", "WF0_HB5", "WF0_HB6",
+--			       "WF0_HB7", "WF0_HB8", "WF0_HB9", "WF0_HB10",
+--			       "WF0_TOP_CLK", "WF0_TOP_DATA";
+--			drive-strength = <4>;
+--		};
+--	};
+--};
+--
+- &spi0 {
+- 	pinctrl-names = "default";
+- 	pinctrl-0 = <&spi_flash_pins>;
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-08-arm64-dts-mediatek-fix-spim-nand-nor-dts-setting.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-08-arm64-dts-mediatek-fix-spim-nand-nor-dts-setting.patch
+deleted file mode 100644
+index a0dcc53..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-08-arm64-dts-mediatek-fix-spim-nand-nor-dts-setting.patch
++++ /dev/null
+@@ -1,64 +0,0 @@
+----
+-[v1] arm64: dts: mt7986a rfb: fix spim nand nor dts setting
+-
+-Fix SPI NAND/NOR clock setting and move pinctrl nodes from base dts to flash
+-specific overlay-dts. Changes SPI NAND clock frequency from 10MHz to 52MHz and
+-relocates pinctrl configuration from mt7986a-rfb.dts to respective flash specific
+-overlay-dts (spi_nand_pins for NAND, spi_nor_pins for NOR) for proper flash type
+-specific pin configuration.
+----
+-v1: Move openwrt-master files to openwrt-25.12 branch after OpenWrt official
+-    25.12 branch release.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-@@ -37,12 +37,14 @@
+- };
+- 
+- &spi0 {
+-+	pinctrl-names = "default";
+-+	pinctrl-0 = <&spi_nand_pins>;
+- 	status = "okay";
+- 
+- 	spi_nand: spi_nand@1 {
+- 		compatible = "spi-nand";
+- 		reg = <1>;
+--		spi-max-frequency = <10000000>;
+-+		spi-max-frequency = <52000000>;
+- 		spi-tx-bus-width = <4>;
+- 		spi-rx-bus-width = <4>;
+- 
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nor.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nor.dts
+-@@ -7,6 +7,8 @@
+- };
+- 
+- &spi0 {
+-+	pinctrl-names = "default";
+-+	pinctrl-0 = <&spi_nor_pins>;
+- 	status = "okay";
+- 
+- 	spi_nor: spi_nor@0 {
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb.dts
+-@@ -179,8 +179,6 @@
+- };
+- 
+- &spi0 {
+--	pinctrl-names = "default";
+--	pinctrl-0 = <&spi_flash_pins>;
+- 	cs-gpios = <0>, <0>;
+- 	status = "disabled";
+- };
+---- a/arch/arm64/boot/dts/mediatek/mt7986-spim-nand-nmbm.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986-spim-nand-nmbm.dtso
+-@@ -13,6 +13,8 @@
+- };
+- 
+- &{/soc/spi@1100a000} {
+-+	pinctrl-names = "default";
+-+	pinctrl-0 = <&spi_nand_pins>;
+- 	status = "okay";
+- 
+- 	flash@0 {
+diff --git a/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-13-arm64-dts-mediatek-add-last-partition-size-extend-to-end-support.patch b/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-13-arm64-dts-mediatek-add-last-partition-size-extend-to-end-support.patch
+deleted file mode 100644
+index 8a9195b..0000000
+--- a/target/linux/mediatek/patches-6.12/999-dts-mt7986a-rfb-13-arm64-dts-mediatek-add-last-partition-size-extend-to-end-support.patch
++++ /dev/null
+@@ -1,85 +0,0 @@
+----
+-[v1] arm64: dts: mediatek: mt7986a: Add mtd partition extend to end support
+-Add "mtd-extend-to-end" in mt7986a spim nand/nor related dts.
+-Partition with "mtd-extend-to-end" will extend to the end of
+-parent partiton and note that the size of partition in reg must be
+-set to 0 like reg = <0x0200000 0x0>.
+----
+-v1: Add mtd partition extend to end support.
+----
+-
+---- a/arch/arm64/boot/dts/mediatek/mt7986-spim-nand-nmbm.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986-spim-nand-nmbm.dtso
+-@@ -55,8 +55,9 @@
+- 
+- 			partition@780000 {
+- 				label = "ubi";
+--				reg = <0x580000 0x4000000>;
+-+				reg = <0x580000 0x0>;
+- 				compatible = "linux,ubi";
+-+				mtd-extend-to-end;
+- 
+- 				volumes {
+- 					ubi_rootfs: ubi-volume-fit {
+---- a/arch/arm64/boot/dts/mediatek/mt7986-spim-nand.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986-spim-nand.dtso
+-@@ -35,8 +35,9 @@
+- 
+- 			partition@200000 {
+- 				label = "ubi";
+--				reg = <0x0200000 0x7e00000>;
+-+				reg = <0x0200000 0x0>;
+- 				compatible = "linux,ubi";
+-+				mtd-extend-to-end;
+- 
+- 				volumes {
+- 					ubi-volume-ubootenv {
+---- a/arch/arm64/boot/dts/mediatek/mt7986-spim-nor.dtso
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986-spim-nor.dtso
+-@@ -39,7 +39,8 @@
+- 		};
+- 		nor_rootfs: partition@180000 {
+- 			label = "firmware";
+--			reg = <0x180000 0x1e80000>;
+-+			reg = <0x180000 0x0>;
+-+			mtd-extend-to-end;
+- 		};
+- 	};
+- };
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-acelink-ew-7886cax.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-acelink-ew-7886cax.dts
+-@@ -147,8 +147,9 @@
+- 			};
+- 
+- 			partition@580000 {
+--				reg = <0x580000 0x4000000>;
+-+				reg = <0x580000 0x0>;
+- 				label = "ubi";
+-+				mtd-extend-to-end;
+- 			};
+- 		};
+- 	};
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nand.dts
+-@@ -71,7 +71,8 @@
+- 			};
+- 			partition@580000 {
+- 				label = "ubi";
+--				reg = <0x580000 0x4000000>;
+-+				reg = <0x580000 0x0>;
+-+				mtd-extend-to-end;
+- 			};
+- 		};
+- 	};
+---- a/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nor.dts
+-+++ b/arch/arm64/boot/dts/mediatek/mt7986a-rfb-spim-nor.dts
+-@@ -40,7 +40,8 @@
+- 			};
+- 			partition@180000 {
+- 				label = "firmware";
+--				reg = <0x180000 0xE00000>;
+-+				reg = <0x180000 0x0>;
+-+				mtd-extend-to-end;
+- 			};
+- 		};
+- 	};
+diff --git a/target/linux/mediatek/patches-6.12/999-eth-07-mtk_eth_soc-fix-panic-issue-with-napi_enable.patch b/target/linux/mediatek/patches-6.12/999-eth-07-mtk_eth_soc-fix-panic-issue-with-napi_enable.patch
+index c4f2ea1..8fda0bf 100644
+--- a/target/linux/mediatek/patches-6.12/999-eth-07-mtk_eth_soc-fix-panic-issue-with-napi_enable.patch
++++ b/target/linux/mediatek/patches-6.12/999-eth-07-mtk_eth_soc-fix-panic-issue-with-napi_enable.patch
+@@ -38,58 +38,6 @@ Signed-off-by: Bo-Cun Chen <bc-bocun.chen@mediatek.com>
+  static int mtk_free_dev(struct mtk_eth *eth)
+  {
+  	int i;
+-@@ -5982,6 +5988,20 @@ static int mtk_probe(struct platform_dev
+- 		}
+- 	}
+- 
+-+	/* we run 2 devices on the same DMA ring so we need a dummy device
+-+	 * for NAPI to work
+-+	 */
+-+	eth->dummy_dev = alloc_netdev_dummy(0);
+-+	if (!eth->dummy_dev) {
+-+		err = -ENOMEM;
+-+		dev_err(eth->dev, "failed to allocated dummy device\n");
+-+		goto err_deinit_ppe;
+-+	}
+-+	eth->dummy_dev->threaded = 1;
+-+	strcpy(eth->dummy_dev->name, "mtk_eth");
+-+	netif_napi_add(eth->dummy_dev, &eth->tx_napi, mtk_napi_tx);
+-+	netif_napi_add(eth->dummy_dev, &eth->rx_napi, mtk_napi_rx);
+-+
+- 	for (i = 0; i < MTK_MAX_DEVS; i++) {
+- 		if (!eth->netdev[i])
+- 			continue;
+-@@ -5996,20 +6016,6 @@ static int mtk_probe(struct platform_dev
+- 				   eth->netdev[i]->base_addr, eth->irq[MTK_FE_IRQ_SHARED]);
+- 	}
+- 
+--	/* we run 2 devices on the same DMA ring so we need a dummy device
+--	 * for NAPI to work
+--	 */
+--	eth->dummy_dev = alloc_netdev_dummy(0);
+--	if (!eth->dummy_dev) {
+--		err = -ENOMEM;
+--		dev_err(eth->dev, "failed to allocated dummy device\n");
+--		goto err_unreg_netdev;
+--	}
+--	eth->dummy_dev->threaded = 1;
+--	strcpy(eth->dummy_dev->name, "mtk_eth");
+--	netif_napi_add(eth->dummy_dev, &eth->tx_napi, mtk_napi_tx);
+--	netif_napi_add(eth->dummy_dev, &eth->rx_napi, mtk_napi_rx);
+--
+- 	platform_set_drvdata(pdev, eth);
+- 	schedule_delayed_work(&eth->reset.monitor_work,
+- 			      MTK_DMA_MONITOR_TIMEOUT);
+-@@ -6018,7 +6024,9 @@ static int mtk_probe(struct platform_dev
+- 
+- err_unreg_netdev:
+- 	mtk_unreg_dev(eth);
+-+	free_netdev(eth->dummy_dev);
+- err_deinit_ppe:
+-+	mtk_napi_del(eth);
+- 	mtk_ppe_deinit(eth);
+- 	mtk_release_all_muxes(eth);
+- 	mtk_mdio_cleanup(eth);
+ @@ -6057,8 +6065,7 @@ static void mtk_remove(struct platform_d
+  	mtk_wed_exit();
+  	mtk_hw_deinit(eth);
+diff --git a/target/linux/mediatek/patches-6.12/999-eth-91-mtk_eth_soc-add-mtkhnat-driver-support.patch b/target/linux/mediatek/patches-6.12/999-eth-91-mtk_eth_soc-add-mtkhnat-driver-support.patch
+index 0552396..9368105 100644
+--- a/target/linux/mediatek/patches-6.12/999-eth-91-mtk_eth_soc-add-mtkhnat-driver-support.patch
++++ b/target/linux/mediatek/patches-6.12/999-eth-91-mtk_eth_soc-add-mtkhnat-driver-support.patch
+@@ -163,12 +163,13 @@ Subject: [PATCH] net: ethernet: mtk_eth_soc: add mtkhnat driver support
+  
+  	mtk_eth_debugfs_init(eth);
+  
+-@@ -7671,7 +7730,9 @@ err_unreg_netdev:
+- 	free_netdev(eth->dummy_dev);
+- err_deinit_ppe:
+- 	mtk_napi_del(eth);
++@@ -7590,9 +7590,11 @@ err_deinit_ppe:
++ 		netif_napi_del(&eth->rx_napi);
++ 		free_netdev(eth->dummy_dev);
++ 	}
++-	mtk_ppe_deinit(eth);
+ +#if !defined(CONFIG_NET_MEDIATEK_HNAT) && !defined(CONFIG_NET_MEDIATEK_HNAT_MODULE)
+- 	mtk_ppe_deinit(eth);
+++	mtk_ppe_deinit(eth);
+ +#endif
+  	mtk_release_all_muxes(eth);
+  	mtk_mdio_cleanup(eth);
+diff --git a/target/linux/mediatek/patches-6.12/999-pcs-01-mtk-lynxi-add-pextp-reset.patch b/target/linux/mediatek/patches-6.12/999-pcs-01-mtk-lynxi-add-pextp-reset.patch
+index bcf2743..c0a83b2 100644
+--- a/target/linux/mediatek/patches-6.12/999-pcs-01-mtk-lynxi-add-pextp-reset.patch
++++ b/target/linux/mediatek/patches-6.12/999-pcs-01-mtk-lynxi-add-pextp-reset.patch
+@@ -53,17 +53,15 @@ Subject: [PATCH] net: pcs: mtk-lynxi: add pextp reset
+  static struct mtk_pcs_lynxi *pcs_to_mtk_pcs_lynxi(struct phylink_pcs *pcs)
+  {
+  	return container_of(pcs, struct mtk_pcs_lynxi, pcs);
+-@@ -151,6 +160,13 @@ static void mtk_pcs_lynxi_get_state(stru
+- 	regmap_read(mpcs->regmap, SGMSYS_PCS_ADVERTISE, &adv);
+- 	phylink_mii_c22_pcs_decode_state(state, neg_mode,
+- 					 bmsr, FIELD_GET(SGMII_LPA, adv));
++@@ -155,5 +164,11 @@ static void mtk_pcs_lynxi_get_state(stru
++ 	phylink_mii_c22_pcs_decode_state(state, neg_mode, bmsr,
++ 					 FIELD_GET(SGMII_LPA, adv));
+ +
+ +	/* Continuously repeat re-configuration sequence until link comes up */
+ +	if (!state->link) {
+ +		mtk_pcs_lynxi_config(pcs, neg_mode,
+ +				     state->interface, mpcs->advertising, false);
+ +	}
+-+}
+  }
+  
+  static void mtk_sgmii_reset(struct mtk_pcs_lynxi *mpcs)

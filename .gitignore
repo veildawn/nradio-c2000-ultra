@@ -1,1 +1,13 @@
 .DS_Store
+*.bin
+*.pdf
+*.squashfs
+*.itb
+*.dtb
+
+build/ref/
+build/ultra-firmware/
+build/upstream/
+build/output/
+build/dropped-patches/
+build/*.log
