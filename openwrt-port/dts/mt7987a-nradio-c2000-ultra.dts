@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * NRadio C2000MAX-Ultra (MT7987A).
+ *
+ * Second-system root follows the vendor layout already used by the official
+ * NRadio C8 port: the bootloader starts this kernel with PARTLABEL=rootfs_2nd.
+ * Pin assignments match the device tree the board is running today.
+ */
+
+/dts-v1/;
+#include "mt7987a.dtsi"
+#include <dt-bindings/input/input.h>
+
+/ {
+	model = "NRadio C2000MAX-Ultra";
+	compatible = "nradio,c2000-ultra", "mediatek,mt7987a", "mediatek,mt7987";
+
+	aliases {
+		serial0 = &uart0;
+		led-boot = &led_status;
+		led-failsafe = &led_status;
+		led-running = &led_status;
+		led-upgrade = &led_status;
+		ethernet0 = &gmac0;
+		ethernet1 = &gmac1;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		bootargs = "console=ttyS0,115200n8 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs_2nd rootwait pci=pcie_bus_perf";
+	};
+
+	/* Board has 1 GiB. The SoC dtsi default is 256 MiB. */
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x40000000>;
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+
+		wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
+			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_status: status {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&pio 9 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		led-cmode5 {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+			gpios = <&pio 8 GPIO_ACTIVE_LOW>;
+		};
+
+		led-cmode4 {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+			gpios = <&pio 11 GPIO_ACTIVE_LOW>;
+		};
+
+		led-internet {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_WAN;
+			gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+		};
+
+		led-error {
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_FAULT;
+			gpios = <&pio 12 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	/*
+	 * Modem power and SIM select. Values match the running board so the
+	 * MT5700M stays powered the way the bootloader left it.
+	 */
+	gpio-export {
+		compatible = "gpio-export";
+
+		cpepower {
+			gpio-export,name = "cpe-pwr";
+			gpio-export,output = <0>;
+			gpios = <&pio 49 GPIO_ACTIVE_LOW>;
+		};
+
+		cpesel0 {
+			gpio-export,name = "cpe-sel0";
+			gpio-export,output = <0>;
+			gpios = <&pio 48 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	reg_3p3v: regulator-3p3v {
+		compatible = "regulator-fixed";
+		regulator-name = "fixed-3.3V";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	reg_usb_5v: regulator-usb-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+};
+
+&eth {
+	status = "okay";
+};
+
+&gmac0 {
+	phy-mode = "2500base-x";
+	phy-handle = <&phy0>;
+	status = "okay";
+};
+
+&gmac1 {
+	phy-mode = "internal";
+	phy-handle = <&phy1>;
+	status = "okay";
+};
+
+&mdio {
+	/* Airoha EN8811H, PHY ID 03a2.a411, MDIO address 11. */
+	phy0: phy@b {
+		compatible = "ethernet-phy-id03a2.a411";
+		reg = <11>;
+		reset-gpios = <&pio 42 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <10000>;
+		phy-mode = "2500base-x";
+	};
+
+	/* SoC built-in 2.5G PHY. */
+	phy1: phy@f {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <15>;
+		pinctrl-names = "i2p5gbe-led";
+		pinctrl-0 = <&i2p5gbe_led0_pins>;
+	};
+};
+
+&mmc0 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc_pins_default>;
+	pinctrl-1 = <&mmc_pins_uhs>;
+	bus-width = <4>;
+	max-frequency = <50000000>;
+	cap-sd-highspeed;
+	no-mmc;
+	no-sdio;
+	non-removable;
+	broken-cd;
+	vmmc-supply = <&reg_3p3v>;
+	vqmmc-supply = <&reg_3p3v>;
+	status = "okay";
+};
+
+&pcie0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie0_pins>;
+	/* Deasserted level on this board is physical high. */
+	reset-gpios = <&pio 38 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	pcie@0,0 {
+		reg = <0x0000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		device_type = "pci";
+
+		wifi@0,0 {
+			compatible = "mediatek,mt76";
+			reg = <0x0000 0 0 0 0>;
+			nvmem-cells = <&eeprom_factory>;
+			nvmem-cell-names = "eeprom";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ieee80211-freq-limit = <2400000 2500000>,
+					       <5170000 5835000>;
+		};
+	};
+};
+
+&pcie1 {
+	status = "disabled";
+};
+
+&pio {
+	pwm_fan_pins: pwm-fan-pins {
+		mux {
+			function = "pwm";
+			groups = "pwm1_0";
+		};
+	};
+
+	spi2_pins: spi2-pins {
+		mux {
+			function = "spi";
+			groups = "spi2";
+		};
+	};
+};
+
+&pwm {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm_fan_pins>;
+	status = "okay";
+};
+
+&fan {
+	pwms = <&pwm 1 50000 0>;
+	status = "okay";
+};
+
+&spi2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi2_pins>;
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@40000 {
+				label = "u-boot-env";
+				reg = <0x40000 0x10000>;
+			};
+
+			partition@50000 {
+				label = "Factory";
+				reg = <0x50000 0x100000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					eeprom_factory: eeprom@0 {
+						reg = <0x0 0x1e00>;
+					};
+				};
+			};
+
+			partition@150000 {
+				label = "bdinfo";
+				reg = <0x150000 0x80000>;
+				read-only;
+			};
+		};
+	};
+};
+
+&ssusb {
+	status = "okay";
+	vusb33-supply = <&reg_3p3v>;
+	vbus-supply = <&reg_usb_5v>;
+};
+
+&tphyu3port0 {
+	status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pins>;
+	status = "okay";
+};

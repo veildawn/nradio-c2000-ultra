@@ -1,0 +1,71 @@
+#!/bin/sh
+# Bring up the onboard TD Tech / Huawei MT5700M-CN (USB NCM).
+# Official Linux 6.18 already binds 3466:3301 in option.c. Data uses CDC NCM
+# and the stock comgt NDISDUP profile.
+
+. /lib/functions.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+log() {
+	logger -t mt5700 "$*"
+}
+
+apn_from_imsi() {
+	case "$1" in
+	46000*|46002*|46004*|46007*|46008*|46013*|46024*) echo cmnet ;;
+	46001*|46006*|46009*|46010*) echo 3gnet ;;
+	46003*|46005*|46011*|46012*) echo ctnet ;;
+	46015*) echo cbnet ;;
+	*) echo ;;
+	esac
+}
+
+wait_ports() {
+	i=0
+	while [ "$i" -lt 30 ]; do
+		ls /dev/ttyUSB* >/dev/null 2>&1 && return 0
+		i=$((i + 1))
+		sleep 2
+	done
+	return 1
+}
+
+find_at() {
+	for p in /dev/ttyUSB*; do
+		[ -c "$p" ] || continue
+		out=$(gcom -d "$p" -s /etc/gcom/getcardinfo.gcom 2>/dev/null) || continue
+		echo "$out" | grep -qi 'huawei\|tdtech\|td tech\|hisilicon' && {
+			echo "$p"
+			return 0
+		}
+	done
+	return 1
+}
+
+wait_ports || {
+	log "no AT port"
+	exit 0
+}
+
+at=$(find_at) || {
+	log "modem did not answer AT+CGMI"
+	exit 0
+}
+
+log "AT port $at"
+uci set network.wwan.device="$at"
+
+imsi=$(gcom -d "$at" -s /etc/gcom/getimsi.gcom 2>/dev/null | tr -cd '0-9')
+apn=$(apn_from_imsi "$imsi")
+cur=$(uci -q get network.wwan.apn)
+if [ -n "$apn" ] && { [ "$cur" = "auto" ] || [ -z "$cur" ]; }; then
+	uci set network.wwan.apn="$apn"
+	log "IMSI ${imsi:-unknown} APN $apn"
+else
+	log "keep APN ${cur:-<empty>}"
+fi
+uci commit network
+
+ifup wwan
+exit 0

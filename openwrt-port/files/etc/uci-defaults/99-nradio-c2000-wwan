@@ -1,0 +1,29 @@
+#!/bin/sh
+. /lib/functions.sh
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+uci -q get network.wwan >/dev/null && exit 0
+
+uci set network.wwan=interface
+uci set network.wwan.proto='ncm'
+uci set network.wwan.device='/dev/ttyUSB1'
+uci set network.wwan.apn='auto'
+uci set network.wwan.pdptype='IPV4V6'
+uci set network.wwan.delay='10'
+uci set network.wwan.mode='auto'
+uci set network.wwan.ipv6='auto'
+
+# Attach the cellular interface to the WAN firewall zone.
+i=0
+while uci -q get firewall.@zone[$i] >/dev/null; do
+	name=$(uci -q get firewall.@zone[$i].name)
+	if [ "$name" = "wan" ]; then
+		uci add_list firewall.@zone[$i].network='wwan'
+		break
+	fi
+	i=$((i + 1))
+done
+
+uci commit network
+uci commit firewall
+exit 0
