@@ -1,13 +1,13 @@
 .DS_Store
-*.bin
-*.pdf
+
+# 编译产物和拆出来的镜像留在本机
 *.squashfs
 *.itb
 *.dtb
+build/
 
-build/ref/
-build/ultra-firmware/
-build/upstream/
-build/output/
-build/dropped-patches/
-build/*.log
+# 二进制和文档只保留整理后的目录
+*.bin
+*.pdf
+!firmware/**/*.bin
+!docs/**/*.pdf
