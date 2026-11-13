@@ -29,7 +29,7 @@ jobs:
       - name: Install host prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential file gawk getopt libncurses-dev python3 rsync unzip wget xz-utils zstd
+          sudo apt-get install -y build-essential file gawk libncurses-dev python3 rsync unzip util-linux wget xz-utils zstd
 
       - name: Download official OpenWrt Snapshot Filogic ImageBuilder
         run: |
