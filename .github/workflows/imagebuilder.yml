@@ -1,0 +1,73 @@
+name: OpenWrt ImageBuilder (NRadio C2000 Ultra)
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_packages:
+        description: "Space-separated OpenWrt packages to preinstall"
+        required: false
+        default: "luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn iw-full pciutils usbutils picocom"
+      publish_release:
+        description: "Publish built sysupgrade.bin as a GitHub Release"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install host prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential file gawk getopt libncurses-dev python3 rsync unzip wget xz-utils zstd
+
+      - name: Download official OpenWrt Snapshot Filogic ImageBuilder
+        run: |
+          mkdir -p /tmp/ib/extracted
+          curl -fL --retry 3 -o /tmp/ib/ib.tar.zst \
+            https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/openwrt-imagebuilder-mediatek-filogic.Linux-x86_64.tar.zst
+          curl -fsSL https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/version.buildinfo \
+            -o /tmp/ib/version.buildinfo
+          tar --use-compress-program=unzstd -xf /tmp/ib/ib.tar.zst -C /tmp/ib/extracted --strip-components=1
+
+      - name: Inject NRadio C2000 Ultra board support
+        run: |
+          python3 board/inject_imagebuilder.py /tmp/ib/extracted
+
+      - name: Pack custom sysupgrade.bin
+        run: |
+          umask 022
+          make -C /tmp/ib/extracted image \
+            PROFILE="nradio_c2000-ultra" \
+            PACKAGES="kmod-usb-net-cdc-ether ${{ inputs.extra_packages }}" \
+            FILES="files-c2000-ultra"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-nradio-c2000-ultra-${{ github.run_number }}
+          path: |
+            /tmp/ib/extracted/bin/targets/mediatek/filogic/*nradio_c2000-ultra*
+            /tmp/ib/extracted/bin/targets/mediatek/filogic/sha256sums
+            /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb
+
+      - name: Create GitHub Release (optional)
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REV="$(cat /tmp/ib/version.buildinfo)"
+          TAG="openwrt-${REV}-$(date -u +%Y%m%d%H%M)"
+          gh release create "$TAG" \
+            /tmp/ib/extracted/bin/targets/mediatek/filogic/*nradio_c2000-ultra* \
+            /tmp/ib/extracted/bin/targets/mediatek/filogic/sha256sums \
+            /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb \
+            --title "OpenWrt Snapshot (${REV}) for NRadio C2000 Ultra" \
+            --notes "Built from official OpenWrt Snapshot Filogic ImageBuilder (${REV}) with NRadio C2000 Ultra board support."

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: (GPL-2.0 OR MIT)
-// NRadio C2000 Ultra on official OpenWrt. Pinout and ports come from the
-// factory image and the running third-party DTB.
+// NRadio C2000 Ultra on official OpenWrt (MT7987A + MT7992 BE5040 + MT5700M-CN).
+// Hardware pinout, PCIe Wi-Fi reset, SPI2/SD pinmux, cooling fan power/PWM,
+// Ethernet PHYs, and 5G modem GPIOs cross-verified against Factory & Mwrt DTBs.
 
 /dts-v1/;
 #include "mt7987a.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 
@@ -13,11 +15,11 @@
 
 	aliases {
 		serial0 = &uart0;
+		mmc0 = &mmc0;
 		led-boot = &led_status;
-		led-failsafe = &led_status;
+		led-failsafe = &led_error;
 		led-running = &led_status;
 		led-upgrade = &led_status;
-		label-mac-device = &gmac0;
 	};
 
 	chosen {
@@ -56,12 +58,14 @@
 		led-cmode5 {
 			color = <LED_COLOR_ID_BLUE>;
 			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <0>;
 			gpios = <&pio 8 GPIO_ACTIVE_LOW>;
 		};
 
 		led-cmode4 {
 			color = <LED_COLOR_ID_BLUE>;
 			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
 			gpios = <&pio 11 GPIO_ACTIVE_LOW>;
 		};
 
@@ -71,10 +75,24 @@
 			gpios = <&pio 10 GPIO_ACTIVE_LOW>;
 		};
 
-		led-error {
+		led_error: led-error {
 			color = <LED_COLOR_ID_RED>;
 			function = LED_FUNCTION_FAULT;
 			gpios = <&pio 12 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	pwm-leds {
+		compatible = "pwm-leds";
+
+		led-ambient {
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+			pwms = <&pwm 0 50000 0>;
+			max-brightness = <255>;
+			active-low;
+			default-state = "on";
 		};
 	};
 
@@ -85,6 +103,23 @@
 		regulator-max-microvolt = <3300000>;
 		regulator-boot-on;
 		regulator-always-on;
+	};
+
+	reg_usb_5v: regulator-usb-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	reg_fan: regulator-fan {
+		compatible = "regulator-fixed";
+		regulator-name = "fan";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpios = <&pio 5 GPIO_ACTIVE_LOW>;
 	};
 
 	gpio_export {
@@ -99,10 +134,22 @@
 
 		cpesel0 {
 			gpio-export,name = "cpe-sel0";
-			gpio-export,output = <1>;
+			gpio-export,output = <0>;
 			gpios = <&pio 48 GPIO_ACTIVE_HIGH>;
 		};
 	};
+};
+
+&cpu_trip_active_low {
+	temperature = <45000>;
+};
+
+&cpu_trip_active_med {
+	temperature = <65000>;
+};
+
+&cpu_trip_active_high {
+	temperature = <80000>;
 };
 
 &eth {
@@ -122,7 +169,7 @@
 };
 
 &mdio {
-	phy15: phy@15 {
+	phy15: phy@f {
 		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <15>;
 		phy-mode = "internal";
@@ -130,24 +177,23 @@
 		pinctrl-0 = <&i2p5gbe_led0_pins>;
 	};
 
-	phy11: phy@11 {
+	phy11: phy@b {
 		compatible = "ethernet-phy-id03a2.a411";
 		reg = <11>;
 		reset-gpios = <&pio 42 GPIO_ACTIVE_LOW>;
 		reset-assert-us = <10000>;
-		reset-deassert-us = <10000>;
+		reset-deassert-us = <20000>;
 		phy-mode = "2500base-x";
 	};
 };
 
 &mmc0 {
 	pinctrl-names = "default", "state_uhs";
-	pinctrl-0 = <&mmc_pins_default>;
-	pinctrl-1 = <&mmc_pins_uhs>;
+	pinctrl-0 = <&sd_pins_default>;
+	pinctrl-1 = <&sd_pins_uhs>;
 	bus-width = <4>;
 	max-frequency = <50000000>;
 	cap-sd-highspeed;
-	cap-mmc-highspeed;
 	vmmc-supply = <&reg_3p3v>;
 	vqmmc-supply = <&reg_3p3v>;
 	non-removable;
@@ -159,8 +205,9 @@
 
 &pcie0 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&pcie0_pins>;
-	reset-gpios = <&pio 38 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&pcie0_1_pins>;
+	wifi-reset-gpios = <&pio 38 GPIO_ACTIVE_LOW>;
+	wifi-reset-msleep = <100>;
 	status = "okay";
 
 	pcie@0,0 {
@@ -172,8 +219,12 @@
 		wifi@0,0 {
 			compatible = "mediatek,mt76";
 			reg = <0x0000 0 0 0 0>;
-			nvmem-cells = <&eeprom_factory>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			nvmem-cells = <&eeprom_factory_0>;
 			nvmem-cell-names = "eeprom";
+			ieee80211-freq-limit = <2400000 2500000>,
+					       <5170000 5835000>;
 		};
 	};
 };
@@ -184,7 +235,7 @@
 
 &spi2 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&spi2_flash_pins>;
+	pinctrl-0 = <&spi2_c2ku_pins>;
 	status = "okay";
 
 	flash@0 {
@@ -196,6 +247,12 @@
 			compatible = "fixed-partitions";
 			#address-cells = <1>;
 			#size-cells = <1>;
+
+			partition@0 {
+				label = "BL2";
+				reg = <0x0 0x40000>;
+				read-only;
+			};
 
 			partition@40000 {
 				label = "u-boot-env";
@@ -212,7 +269,7 @@
 					#address-cells = <1>;
 					#size-cells = <1>;
 
-					eeprom_factory: eeprom@0 {
+					eeprom_factory_0: eeprom@0 {
 						reg = <0x0 0x1e00>;
 					};
 				};
@@ -223,31 +280,60 @@
 				reg = <0x150000 0x80000>;
 				read-only;
 			};
+
+			partition@1d0000 {
+				label = "FIP";
+				reg = <0x1d0000 0x100000>;
+				read-only;
+			};
+
+			partition@2d0000 {
+				label = "firmware";
+				reg = <0x2d0000 0x1d30000>;
+				read-only;
+			};
 		};
 	};
 };
 
 &fan {
+	fan-supply = <&reg_fan>;
 	pwms = <&pwm 1 50000 0>;
 	status = "okay";
 };
 
 &pwm {
 	pinctrl-names = "default";
-	pinctrl-0 = <&pwm_fan_pins>;
+	pinctrl-0 = <&pwm_c2ku_pins>;
 	status = "okay";
 };
 
 &pio {
-	pwm_fan_pins: pwm-fan-pins {
+	pcie0_1_pins: pcie0-pins-g1 {
+		mux {
+			function = "pcie";
+			groups = "pcie0_pereset", "pcie0_clkreq";
+		};
+	};
+
+	pwm_c2ku_pins: pwm-c2ku-pins {
 		mux {
 			function = "pwm";
-			groups = "pwm1_0";
+			groups = "pwm0", "pwm1_0";
+		};
+	};
+
+	spi2_c2ku_pins: spi2-c2ku-pins {
+		mux {
+			function = "spi";
+			groups = "spi2";
 		};
 	};
 };
 
 &ssusb {
+	vusb33-supply = <&reg_3p3v>;
+	vbus-supply = <&reg_usb_5v>;
 	status = "okay";
 };
 

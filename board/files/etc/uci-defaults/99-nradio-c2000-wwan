@@ -1,0 +1,42 @@
+#!/bin/sh
+. /lib/functions.sh
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+if ! uci -q get network.wwan >/dev/null; then
+	uci set network.wwan=interface
+	uci set network.wwan.proto='ncm'
+	uci set network.wwan.device='/dev/ttyUSB1'
+	uci set network.wwan.pdptype='IPV4V6'
+	uci set network.wwan.delay='5'
+	uci set network.wwan.metric='20'
+	uci set network.wwan.ipv6='auto'
+else
+	# Clean up legacy invalid literals if upgrading with config preserved
+	[ "$(uci -q get network.wwan.apn)" = "auto" ] && uci -q delete network.wwan.apn
+	[ "$(uci -q get network.wwan.mode)" = "auto" ] && uci -q delete network.wwan.mode
+fi
+
+# Ensure wwan and dynamic NCM DHCPv4/DHCPv6 sub-interfaces (wwan_4, wwan_6)
+# are attached to the WAN firewall zone under firewall4 (fw4)
+i=0
+while uci -q get firewall.@zone[$i] >/dev/null; do
+	if [ "$(uci -q get firewall.@zone[$i].name)" = "wan" ]; then
+		cur_nets=" $(uci -q get firewall.@zone[$i].network) "
+		for net in wwan wwan_4 wwan_6; do
+			case "$cur_nets" in
+			*" $net "*) ;;
+			*) uci add_list firewall.@zone[$i].network="$net" ;;
+			esac
+		done
+		break
+	fi
+	i=$((i + 1))
+done
+
+uci commit network
+uci commit firewall
+
+[ -f /etc/hotplug.d/ieee80211/15-nradio-c2000-wifi-mac ] && \
+	ACTION=add /bin/sh /etc/hotplug.d/ieee80211/15-nradio-c2000-wifi-mac
+
+exit 0

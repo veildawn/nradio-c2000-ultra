@@ -1,0 +1,29 @@
+#!/bin/sh
+# Override MediaTek Factory EEPROM template MACs (00:0c:43:*) on phy add
+# before 10-wifi-detect runs /sbin/wifi config.
+
+[ "$ACTION" = "add" ] || exit 0
+
+PHYNBR=${DEVPATH##*/phy}
+[ -n "$PHYNBR" ] || exit 0
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+cur_mac=$(cat "/sys${DEVPATH}/macaddress" 2>/dev/null)
+case "$cur_mac" in
+""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)
+	base_mac=$(mtd_get_mac_ascii bdinfo "fac_mac")
+	[ -n "$base_mac" ] || base_mac=$(mtd_get_mac_binary Factory 0xffff4)
+	case "$base_mac" in
+	""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)
+		base_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
+		;;
+	esac
+	[ -n "$base_mac" ] || exit 0
+	[ "$PHYNBR" = "0" ] && macaddr_add "$base_mac" 2 > "/sys${DEVPATH}/macaddress"
+	[ "$PHYNBR" = "1" ] && macaddr_add "$base_mac" 3 > "/sys${DEVPATH}/macaddress"
+	;;
+esac

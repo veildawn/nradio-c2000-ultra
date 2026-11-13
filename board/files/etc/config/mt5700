@@ -1,0 +1,6 @@
+config mt5700 'modem'
+	option enabled '1'
+	option sim_slot 'auto'
+	option apn ''
+	option usb3_retrain '1'
+	option check_interval '30'

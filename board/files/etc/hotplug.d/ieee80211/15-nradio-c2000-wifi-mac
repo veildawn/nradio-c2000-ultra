@@ -1,0 +1,48 @@
+#!/bin/sh
+# Populate per-radio macaddr_base on MT7992 single-wiphy MLD (mt7996e) so
+# 5 GHz (radio 1) does not inherit Factory template addresses[1] (00:0c:43:26:60:11).
+
+[ "${ACTION:-add}" = "add" ] || exit 0
+[ -f /etc/config/wireless ] || exit 0
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+base_mac=$(mtd_get_mac_ascii bdinfo "fac_mac")
+[ -n "$base_mac" ] || base_mac=$(mtd_get_mac_binary Factory 0xffff4)
+case "$base_mac" in
+""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)
+	base_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
+	;;
+esac
+[ -n "$base_mac" ] || exit 0
+
+mac_2g=$(macaddr_add "$base_mac" 2)
+mac_5g=$(macaddr_add "$base_mac" 3)
+
+dirty=0
+i=0
+while uci -q get "wireless.@wifi-device[$i]" >/dev/null; do
+	cur_base=$(uci -q get "wireless.@wifi-device[$i].macaddr_base")
+	case "$cur_base" in
+	""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)
+		band=$(uci -q get "wireless.@wifi-device[$i].band")
+		radio_idx=$(uci -q get "wireless.@wifi-device[$i].radio")
+		if [ "$band" = "5g" ] || [ "$radio_idx" = "1" ]; then
+			uci set "wireless.@wifi-device[$i].macaddr_base=$mac_5g"
+			dirty=1
+		elif [ "$band" = "2g" ] || [ "$radio_idx" = "0" ]; then
+			uci set "wireless.@wifi-device[$i].macaddr_base=$mac_2g"
+			dirty=1
+		fi
+		;;
+	esac
+	i=$((i + 1))
+done
+
+if [ "$dirty" = "1" ]; then
+	uci commit wireless
+	ubus call network.wireless reconf >/dev/null 2>&1 || true
+fi
