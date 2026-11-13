@@ -1,6 +1,9 @@
 name: OpenWrt ImageBuilder (NRadio C2000 Ultra)
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       extra_packages:
@@ -30,44 +33,92 @@ jobs:
 
       - name: Download official OpenWrt Snapshot Filogic ImageBuilder
         run: |
-          mkdir -p /tmp/ib/extracted
+          mkdir -p /tmp/ib/extracted /tmp/ib/release
           curl -fL --retry 3 -o /tmp/ib/ib.tar.zst \
             https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/openwrt-imagebuilder-mediatek-filogic.Linux-x86_64.tar.zst
           curl -fsSL https://downloads.openwrt.org/snapshots/targets/mediatek/filogic/version.buildinfo \
             -o /tmp/ib/version.buildinfo
           tar --use-compress-program=unzstd -xf /tmp/ib/ib.tar.zst -C /tmp/ib/extracted --strip-components=1
+          rm -f /tmp/ib/ib.tar.zst
 
       - name: Inject NRadio C2000 Ultra board support
         run: |
-          python3 board/inject_imagebuilder.py /tmp/ib/extracted
+          python3 -B board/inject_imagebuilder.py /tmp/ib/extracted
 
       - name: Pack custom sysupgrade.bin
         run: |
+          EXTRA_PKGS="${{ inputs.extra_packages }}"
+          if [ -z "$EXTRA_PKGS" ]; then
+            EXTRA_PKGS="luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn iw-full pciutils usbutils picocom"
+          fi
           umask 022
           make -C /tmp/ib/extracted image \
             PROFILE="nradio_c2000-ultra" \
-            PACKAGES="kmod-usb-net-cdc-ether ${{ inputs.extra_packages }}" \
+            PACKAGES="kmod-usb-net-cdc-ether ${EXTRA_PKGS}" \
             FILES="files-c2000-ultra"
+
+      - name: Stage release artifacts and checksums
+        run: |
+          cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra* /tmp/ib/release/
+          cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/profiles.json /tmp/ib/release/
+          cp -f /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb /tmp/ib/release/
+          (
+            cd /tmp/ib/release
+            sha256sum \
+              openwrt-mediatek-filogic-nradio_c2000-ultra-squashfs-sysupgrade.bin \
+              openwrt-mediatek-filogic-nradio_c2000-ultra.manifest \
+              openwrt-mediatek-filogic-nradio_c2000-ultra.bom.cdx.json \
+              profiles.json \
+              image-mt7987a-nradio-c2000ultra.dtb > sha256sums
+          )
+          ls -lh /tmp/ib/release
+          cat /tmp/ib/release/sha256sums
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-nradio-c2000-ultra-${{ github.run_number }}
-          path: |
-            /tmp/ib/extracted/bin/targets/mediatek/filogic/*nradio_c2000-ultra*
-            /tmp/ib/extracted/bin/targets/mediatek/filogic/sha256sums
-            /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb
+          path: /tmp/ib/release/*
 
-      - name: Create GitHub Release (optional)
-        if: ${{ inputs.publish_release }}
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          REV="$(cat /tmp/ib/version.buildinfo)"
-          TAG="openwrt-${REV}-$(date -u +%Y%m%d%H%M)"
-          gh release create "$TAG" \
-            /tmp/ib/extracted/bin/targets/mediatek/filogic/*nradio_c2000-ultra* \
-            /tmp/ib/extracted/bin/targets/mediatek/filogic/sha256sums \
-            /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb \
-            --title "OpenWrt Snapshot (${REV}) for NRadio C2000 Ultra" \
-            --notes "Built from official OpenWrt Snapshot Filogic ImageBuilder (${REV}) with NRadio C2000 Ultra board support."
+          REV="$(cat /tmp/ib/version.buildinfo | tr -d ' \r\n')"
+          KVER="$(basename /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/linux-* | sed 's/^linux-//')"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="openwrt-${REV}-$(date -u +%Y%m%d%H%M)"
+          fi
+          cat <<EOF > /tmp/ib/release_notes.md
+          ## OpenWrt Official Snapshot (\`${REV}\` / Linux \`${KVER}\`) — NRadio C2000 Ultra
+
+          基于**官方 OpenWrt \`main\` Snapshot \`mediatek/filogic\` ImageBuilder** 自动构建，遵循社区开源主线标准（不使用任何闭源 Wi-Fi 驱动或第三方魔改内核分支）。
+
+          ### 核心特性
+          - **内核与在线软件源**：Linux \`${KVER}\`，内核 \`vermagic\` 与 \`downloads.openwrt.org\` 官方 \`mediatek/filogic\` Snapshot 完全一致，刷入后可直接执行 \`apk update && apk add <pkg>\` 在线安装官方全部 \`kmod-*\` 与软件包。
+          - **Wi-Fi 7 (\`MT7992\` BE5040)**：主线开源 \`mt76\`（\`kmod-mt7996e\` + \`kmod-mt7992-23-firmware\`），包含 PCIe \`pio38\` 硬复位、\`Factory\` \`0x1e00\` EEPROM 校准读取、以及单 wiphy MLD 双频独立 MAC（\`fac_mac + 2\` / \`+ 3\`）自动派生。
+          - **5G 蜂窝 (\`MT5700M-CN\` \`3466:3301\`)**：内置 \`mt5700\` 服务（\`comgt-ncm\` + \`luci-proto-ncm\`），支持 \`cpe-pwr\` 供电管理、热重启 USB 2.0 → USB 3.0 (\`5000M\`) 自动重训练、三路 SIM 卡（外置 SIM1 / SIM2 / 内置 eSIM）自动检测切换、四大运营商 APN 自动下发、\`fw4\` IPv4/IPv6 NAT 防火墙域绑定及 5G/4G 指示灯同步。
+          - **有线与外设**：\`LAN = eth1\`（片内 2.5G PHY）、\`WAN = eth0\`（Airoha \`EN8811H\` 2.5G PHY）、PWM 温控风扇（\`45 / 65 / 80 °C\`）、预装中文 **LuCI**（含 HTTPS \`luci-ssl\`、\`luci-proto-ncm\`、\`iw-full\`、\`pciutils\`、\`usbutils\`、\`picocom\`）。
+
+          ### 刷入说明
+          - **从三方 \`Mwrt\` / OpenWrt 刷入**：在 LuCI「系统 → 备份与升级」上传 \`openwrt-mediatek-filogic-nradio_c2000-ultra-squashfs-sysupgrade.bin\`（**建议取消勾选“保留配置”**，默认管理地址 \`192.168.1.1\`，root 无密码），或在 SSH 执行 \`sysupgrade -n /tmp/openwrt-mediatek-filogic-nradio_c2000-ultra-squashfs-sysupgrade.bin\`。
+          - **从原厂双系统固件刷入**：插好已分区 TF 卡后，在原厂双系统切换/升级页面上传该 \`sysupgrade.bin\`（未签名 \`ustar\` \`compat_version 1.0\`，内置 \`NRadio-C2000MAX-798\` / \`NRadio-C2000MAX-Ultra\` / \`NRadio-C2000Ultra\` / \`nradio,c2000-ultra\` 兼容板名与 \`0x40080000\` FIT 入口）。
+
+          ### SHA-256 校验值
+          \`\`\`text
+          $(cat /tmp/ib/release/sha256sums)
+          \`\`\`
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" /tmp/ib/release/* --clobber
+            gh release edit "$TAG" \
+              --title "OpenWrt Snapshot ${REV} (Linux ${KVER}) for NRadio C2000 Ultra" \
+              --notes-file /tmp/ib/release_notes.md
+          else
+            gh release create "$TAG" /tmp/ib/release/* \
+              --title "OpenWrt Snapshot ${REV} (Linux ${KVER}) for NRadio C2000 Ultra" \
+              --notes-file /tmp/ib/release_notes.md
+          fi
