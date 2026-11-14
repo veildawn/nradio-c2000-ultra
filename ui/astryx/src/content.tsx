@@ -121,7 +121,7 @@ const descriptions: Record<string, [string, string]> = {
   cellular: ["SIM、信号与蜂窝上网", "SIM, signal and cellular access"],
   dhcp: ["地址分配与域名解析", "Address allocation and DNS"],
   firewall: ["区域、规则与端口转发", "Zones, rules and port forwarding"],
-  apps: ["应用流量与访问控制", "Application traffic and access control"],
+  apps: ["应用访问统计与限制", "Application activity and access control"],
   routing: ["静态路由与路由规则", "Static routes and routing rules"],
   system: ["设备、时间与语言", "Device, time and language"],
   admin: ["密码与管理权限", "Password and access"],
