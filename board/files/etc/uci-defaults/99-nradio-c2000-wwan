@@ -60,7 +60,7 @@ uci commit dhcp
 
 # 4. Tune zram-swap (lzo-rle has minimal per-CPU workspace overhead; leaving
 #    zram_size_mb unset lets /etc/init.d/zram auto-size to 50% of MemTotal,
-#    i.e. ~256 MiB on C2000 Ultra's 512 MiB DDR4).
+#    i.e. ~493 MiB on C2000 Ultra's 1 GiB DDR4).
 if uci -q get system.@system[0] >/dev/null; then
 	[ -n "$(uci -q get system.@system[0].zram_comp_algo)" ] || \
 		uci set system.@system[0].zram_comp_algo='lzo-rle'
