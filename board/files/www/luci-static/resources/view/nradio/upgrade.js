@@ -19,6 +19,15 @@ function fmtSize(v) {
 	return n >= 1048576 ? '%.1f MB'.format(n / 1048576) : '%d KB'.format(Math.ceil(n / 1024));
 }
 
+function versionTable(rows) {
+	return E('table', { 'class': 'table' }, E('tbody', {}, rows.map(function(row) {
+		return E('tr', { 'class': 'tr' }, [
+			E('th', { 'scope': 'row', 'class': 'td left', 'width': '30%' }, row[0]),
+			E('td', { 'class': 'td left' }, row[1])
+		]);
+	})));
+}
+
 function exec(args) {
 	return fs.exec('/usr/sbin/c2000-upgrade', args).then(function(res) {
 		var st;
@@ -37,7 +46,10 @@ return view.extend({
 
 	load: function() {
 		// Render local state first, even if GitHub is unreachable.
-		return exec([ 'status' ]).catch(function(e) { return { state: 'unknown', msg: e.message }; });
+		return Promise.all([
+			exec([ 'info' ]).catch(function() { return {}; }),
+			exec([ 'status' ]).catch(function(e) { return { state: 'unknown', msg: e.message }; })
+		]);
 	},
 
 	isActive: function() {
@@ -54,19 +66,12 @@ return view.extend({
 
 	renderCheck: function(st) {
 		this.latest = st;
-		var rows = [
-			[ '当前固件', '%s（构建于 %s）'.format(st.current_rev || '—', fmtDate(st.current_date)) ],
+		this.checkBox.replaceChildren(versionTable([
 			[ '最新发布', st.tag || '—' ],
 			[ '发布时间', (st.published || '—').replace('T', ' ').replace(/Z$/, ' UTC') ],
 			[ '固件大小', fmtSize(st.size) ],
 			[ '内核版本', '%s → %s'.format(st.current_kernel || '未知', st.release_kernel || '未知') ]
-		];
-		this.checkBox.replaceChildren(E('table', { 'class': 'table' }, rows.map(function(row) {
-			return E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left', 'width': '30%' }, row[0]),
-				E('td', { 'class': 'td left' }, row[1])
-			]);
-		})));
+		]));
 		if (st.kernel_match !== 1)
 			this.checkBox.appendChild(E('div', { 'class': 'alert-message warning' },
 				st.kernel_match === 0
@@ -219,7 +224,8 @@ return view.extend({
 		}).finally(L.bind(function() { this.busy = false; this.updateActions(); }, this));
 	},
 
-	render: function(st) {
+	render: function(data) {
+		var current = data[0], st = data[1];
 		this.latest = null;
 		this.busy = false;
 		this.checking = false;
@@ -251,6 +257,10 @@ return view.extend({
 		return E('div', {}, [
 			E('h2', {}, '在线固件更新'),
 			E('p', {}, '检查 veildawn/nradio-c2000-ultra 的最新固件。下载与校验在路由器后台进行。'),
+			versionTable([
+				[ '当前固件', current.current_tag || '未记录发布版本' ],
+				[ '当前 OpenWrt 基线', '%s（上游构建于 %s）'.format(current.current_rev || '—', fmtDate(current.current_date)) ]
+			]),
 			this.checkBox,
 			E('p', {}, [ '下载加速前缀（可选）', E('br'), this.mirrorInput ]),
 			E('p', {}, '直连 GitHub 下载失败时可填写 HTTPS 加速前缀，固件仍按 GitHub 提供的 SHA-256 校验。'),

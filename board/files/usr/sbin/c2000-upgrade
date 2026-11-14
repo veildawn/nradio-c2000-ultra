@@ -6,6 +6,7 @@
 #
 # Commands:
 #   check           query latest release + compare with running firmware
+#   info            identify the running firmware without network access
 #   download URL SHA256 [MIRROR] [TAG]   start background download+verify
 #   status          emit download progress/state as JSON
 #   preflight       verify downloaded image is ready to flash
@@ -19,6 +20,7 @@ BIN="/tmp/c2000-upgrade-sysupgrade.bin"
 PART="$BIN.part"
 CACHE="/tmp/c2000-upgrade.release"
 LOCK="/tmp/c2000-upgrade.lock"
+RELEASE_FILE="/rom/usr/share/nradio-c2000/release"
 umask 077
 
 cur_info() {
@@ -29,6 +31,15 @@ cur_info() {
 	json_get_var CUR_REV revision
 	json_get_var CUR_DATE builddate
 	json_cleanup
+}
+
+do_info() {
+	cur_info
+	json_init
+	json_add_string "current_tag" "$(cat "$RELEASE_FILE" 2>/dev/null)"
+	json_add_string "current_rev" "$CUR_REV"
+	json_add_string "current_date" "$CUR_DATE"
+	json_dump
 }
 
 error() {
@@ -355,6 +366,7 @@ case "${1:-}" in
 check) do_check "${2:-}" ;;
 download) do_download "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
 status) do_status ;;
+info) do_info ;;
 preflight) do_preflight "${2:-}" ;;
 flash) do_flash "${2:-}" "${3:-}" ;;
 _download) download_worker "$2" "$3" "$4" "$5" "$6" ;;

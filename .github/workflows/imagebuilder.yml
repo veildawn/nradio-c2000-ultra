@@ -77,6 +77,20 @@ jobs:
         run: |
           python3 -B board/inject_imagebuilder.py /tmp/ib/extracted
 
+      - name: Record the project release in the firmware
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            REV="$(tr -d ' \r\n' < /tmp/ib/version.buildinfo)"
+            TAG="openwrt-${REV}-$(date -u +%Y%m%d%H%M)"
+          fi
+          RELEASE_FILE=/tmp/ib/extracted/files-c2000-ultra/usr/share/nradio-c2000/release
+          install -d "$(dirname "$RELEASE_FILE")"
+          printf '%s\n' "$TAG" > "$RELEASE_FILE"
+          printf 'NRADIO_RELEASE_TAG=%s\n' "$TAG" >> "$GITHUB_ENV"
+
       - name: Pack custom sysupgrade.bin
         run: |
           EXTRA_PKGS="${{ inputs.extra_packages }}"
@@ -125,6 +139,13 @@ jobs:
                   if i18n not in pkgs:
                       print(f"::warning::No Chinese translation package {i18n} for {app} (may not exist upstream for custom packages); skipping")
           PY
+          if [[ -n "${NRADIO_RELEASE_TAG:-}" ]]; then
+            tar -xOf "$BIN" sysupgrade-nradio_c2000-ultra/root > /tmp/ib/root.squashfs
+            BUILT_TAG=$(/tmp/ib/extracted/staging_dir/host/bin/unsquashfs4 -cat \
+              /tmp/ib/root.squashfs usr/share/nradio-c2000/release)
+            test "$BUILT_TAG" = "$NRADIO_RELEASE_TAG"
+            rm /tmp/ib/root.squashfs
+          fi
           cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra* /tmp/ib/release/
           cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/profiles.json /tmp/ib/release/
           cp -f /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb /tmp/ib/release/
@@ -153,11 +174,7 @@ jobs:
         run: |
           REV="$(cat /tmp/ib/version.buildinfo | tr -d ' \r\n')"
           KVER="$(basename /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/linux-* | sed 's/^linux-//')"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            TAG="${GITHUB_REF_NAME}"
-          else
-            TAG="openwrt-${REV}-$(date -u +%Y%m%d%H%M)"
-          fi
+          TAG="$NRADIO_RELEASE_TAG"
           cat <<EOF > /tmp/ib/release_notes.md
           ## OpenWrt Official Snapshot (\`${REV}\` / Linux \`${KVER}\`) — NRadio C2000 Ultra
 
