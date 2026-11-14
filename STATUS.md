@@ -12,7 +12,7 @@
 
 | 子系统 | 关键硬件参数与适配实现 | 状态 |
 | --- | --- | --- |
-| SoC / 存储 / 双系统 | `MT7987A`（`512 MiB` DDR4 动态映射 + `zram-swap` `50%` 自适应 `lzo-rle` / `swappiness=100`），`mmc0` 4-bit TF 卡（`PARTLABEL=rootfs`），`spi2` NOR 6 分区（`BL2` / `u-boot-env` / `Factory` / `bdinfo` / `FIP` / `firmware`），`uboot-envtools` 严格 CRC32 校验探测 + `c2000-bootswitch` 一键安全切换原厂/OpenWrt 双系统 | 已验证 |
+| SoC / 存储 / 双系统 | `MT7987A`（实机 `1 GiB` DDR4 动态映射，系统可用 `987 MiB` + `zram-swap` `50%` 自适应 `493 MiB` `lzo-rle` / `swappiness=100`），`mmc0` 4-bit TF 卡（`PARTLABEL=rootfs`），`spi2` NOR 6 分区（`BL2` / `u-boot-env` / `Factory` / `bdinfo` / `FIP` / `firmware`），`uboot-envtools` 严格 CRC32 校验探测 + `c2000-bootswitch` 一键安全切换原厂/OpenWrt 双系统 | 已验证 |
 | 双 2.5G 网口 | `LAN = eth1`（片内 2.5G PHY `phy@f` + `mt7987-2p5g-phy-firmware`），`WAN = eth0`（Airoha `EN8811H` `phy@b`，`pio42` 复位 + `airoha-en8811h-firmware`），严格单播 MAC 校验与 `bdinfo` `fac_mac` 派生 | 已验证 |
 | Wi-Fi 7 (`MT7992`) | 开源 `mt76`（`kmod-mt7996e` + `kmod-mt7992-23-firmware`），`&pcie0` 复位 `pio38`（`100ms`），读取 `Factory` `0x0..0x1e00` 校准数据；默认 `country=CN`（解锁 160MHz/DFS 与完整功率），严格校验单播 MAC 并自动派生 `2.4G (+2)` / `5G (+3)` `macaddr_base`（修复 `00:0c:43:*` 模板 MAC 及 `0b:00:43:*` 组播脏 MAC 导致无法桥接 `br-lan` 的问题） | 已验证 |
 | 5G 蜂窝 (`MT5700M-CN`) | USB `3466:3301`（6.18 主线 `option` + `cdc_ether`/`cdc_ncm`），禁用 USB 自动挂起、`cpe-pwr`（`pio49` 低有效）冷断电自愈、热重启 USB 2.0 → USB 3.0（`5000M`）一次性重训练、NVRAM 异常模式自愈（`AT^SETMODE` 保留原厂双系统 `1` 并修复 `6/7/8`，修复 `AT^TDCFG` E5/IP 直通残留与 `AT^C5GOPTION` 5G SA 锁死）、`ncm.sh` 串口并发避让、三路 SIM 切换（外置 SIM1 / SIM2 / 内置 eSIM）、四大运营商 APN 自动配置、`fw4` WAN 域与单 `/64` IPv6 `odhcpd` `ndp='relay'` 中继 | 已验证 |
