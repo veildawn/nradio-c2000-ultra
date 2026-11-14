@@ -1,0 +1,48 @@
+#!/bin/sh
+# Populate per-radio macaddr_base and default CN regulatory domain on MT7992
+# single-wiphy MLD (mt7996e), repairing Factory template (00:0c:43:*) and
+# multicast (e.g. 0b:00:43:26:00:00) EEPROM MACs without clobbering user settings.
+
+[ "${ACTION:-add}" = "add" ] || exit 0
+[ -f /etc/config/wireless ] || exit 0
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+. /lib/functions/nradio-c2000.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+base_mac=$(c2000_get_base_mac)
+[ -n "$base_mac" ] || exit 0
+
+mac_2g=$(macaddr_add "$base_mac" 2)
+mac_5g=$(macaddr_add "$base_mac" 3)
+
+dirty=0
+i=0
+while uci -q get "wireless.@wifi-device[$i]" >/dev/null; do
+	cur_country=$(uci -q get "wireless.@wifi-device[$i].country")
+	if [ -z "$cur_country" ]; then
+		uci set "wireless.@wifi-device[$i].country=CN"
+		dirty=1
+	fi
+
+	cur_base=$(uci -q get "wireless.@wifi-device[$i].macaddr_base")
+	if ! c2000_mac_is_valid_unicast "$cur_base"; then
+		band=$(uci -q get "wireless.@wifi-device[$i].band")
+		radio_idx=$(uci -q get "wireless.@wifi-device[$i].radio")
+		if [ "$band" = "5g" ] || [ "$radio_idx" = "1" ]; then
+			uci set "wireless.@wifi-device[$i].macaddr_base=$mac_5g"
+			dirty=1
+		elif [ "$band" = "2g" ] || [ "$radio_idx" = "0" ]; then
+			uci set "wireless.@wifi-device[$i].macaddr_base=$mac_2g"
+			dirty=1
+		fi
+	fi
+	i=$((i + 1))
+done
+
+if [ "$dirty" = "1" ]; then
+	uci commit wireless
+	ubus call network.wireless reconf >/dev/null 2>&1 || true
+fi

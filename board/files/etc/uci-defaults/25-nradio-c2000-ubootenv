@@ -1,0 +1,51 @@
+#!/bin/sh
+# Configure /etc/config/ubootenv and /etc/fw_env.config for NRadio C2000 Ultra
+# (SPI-NOR partition "u-boot-env" at 0x40000, size 0x10000).
+# Runs before 30_uboot-envtools and strictly verifies U-Boot CRC32 + known env
+# variables before writing /etc/fw_env.config (protecting boot_system/mtdparts).
+
+[ -e /etc/config/ubootenv ] && exit 0
+[ -f /lib/uboot-envtools.sh ] || exit 0
+command -v fw_printenv >/dev/null 2>&1 || exit 0
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+. /lib/uboot-envtools.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+idx=$(find_mtd_index "u-boot-env")
+[ -n "$idx" ] || exit 0
+dev="/dev/mtd$idx"
+[ -c "$dev" ] || exit 0
+
+set -- $(awk -F'[ :]+' 'index($0, "\"u-boot-env\"") { print $2, $3; exit }' /proc/mtd 2>/dev/null)
+part_hex="${1:-10000}"
+erase_hex="${2:-10000}"
+partsize="0x$part_hex"
+secsize="0x$erase_hex"
+
+chosen_size=""
+envcfg="/tmp/fw_env.config.c2000"
+for sz in "$partsize" 0x10000 0x8000 0x4000 0x2000 0x1000; do
+	printf '%s 0x0 %s %s\n' "$dev" "$sz" "$secsize" > "$envcfg"
+	if out=$(fw_printenv -c "$envcfg" 2>&1); then
+		case "$out" in
+		*"Bad CRC"*|*"bad CRC"*|*"Cannot"*) continue ;;
+		esac
+		if printf '%s\n' "$out" | grep -qE '^(boot_from_sd|boot_system|bootdelay|baudrate|bootcmd)='; then
+			chosen_size="$sz"
+			break
+		fi
+	fi
+done
+rm -f "$envcfg"
+
+[ -n "$chosen_size" ] || exit 0
+
+touch /etc/config/ubootenv
+ubootenv_add_uci_config "$dev" "0x0" "$chosen_size" "$secsize"
+config_load ubootenv
+config_foreach ubootenv_add_app_config
+
+exit 0

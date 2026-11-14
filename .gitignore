@@ -1,4 +1,6 @@
 .DS_Store
+__pycache__/
+*.pyc
 
 # 编译产物和拆出来的镜像留在本机
 *.squashfs

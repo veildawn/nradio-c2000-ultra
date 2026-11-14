@@ -1,0 +1,22 @@
+#!/bin/sh
+# Override MediaTek Factory EEPROM template MACs (00:0c:43:*) and corrupted
+# multicast EEPROM MACs (e.g. 0b:00:43:26:00:00) on phy add before 10-wifi-detect.
+
+[ "$ACTION" = "add" ] || exit 0
+
+PHYNBR=${DEVPATH##*/phy}
+[ -n "$PHYNBR" ] || exit 0
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+. /lib/functions/nradio-c2000.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+cur_mac=$(cat "/sys${DEVPATH}/macaddress" 2>/dev/null)
+if ! c2000_mac_is_valid_unicast "$cur_mac"; then
+	base_mac=$(c2000_get_base_mac)
+	[ -n "$base_mac" ] || exit 0
+	[ "$PHYNBR" = "0" ] && macaddr_add "$base_mac" 2 > "/sys${DEVPATH}/macaddress"
+	[ "$PHYNBR" = "1" ] && macaddr_add "$base_mac" 3 > "/sys${DEVPATH}/macaddress"
+fi
