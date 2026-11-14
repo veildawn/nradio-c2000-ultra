@@ -1,0 +1,161 @@
+#!/bin/sh
+# Read-only JSON snapshot for the 「应用管控」LuCI view (luci-app-nradio-c2000).
+# Sources: per-(client, app) aggregated query stats (/tmp/nrapp/state.db with
+# /etc/nrapp/state.db fallback), the curated app catalog, DHCP lease
+# hostnames, and the uci nrapp block state.
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+RUNDIR=/tmp/nrapp
+VDB=$RUNDIR/state.db
+PDB=/etc/nrapp/state.db
+DOMAINS=/usr/share/nradio-c2000/app-domains.json
+
+DB=$VDB
+[ -s "$DB" ] || DB=$PDB
+
+now=$(date +%s)
+
+# ---------- stats matrix (one awk pass) ----------
+stats=""
+[ -s "$DB" ] && stats=$(awk -v now="$now" '
+	BEGIN { FS="=" }
+	/^c\|/ {
+		split($1, a, "|"); split($2, b, " ")
+		app_sum[a[3]] += b[1]
+		if (b[2] > app_last[a[3]]) app_last[a[3]] = b[2]
+		key = a[2] "|" a[3]
+		cnt[key] += b[1]
+		if (!(key in last) || b[2] > last[key]) last[key] = b[2]
+		if (!(a[2] in seen)) { clients[++nc] = a[2]; seen[a[2]] = 1 }
+		if (!(a[3] in aseen)) { order[++oa] = a[3]; aseen[a[3]] = 1 }
+		next
+	}
+	/^u\|/ {
+		split($1, a, "|"); split($2, b, " ")
+		udom[a[2]] += b[1]
+		if (b[2] > ulast[a[2]]) ulast[a[2]] = b[2]
+		next
+	}
+	END {
+		for (i = 1; i <= nc; i++) {
+			c = clients[i]
+			printf "CLIENT %s", c
+			for (j = 1; j <= oa; j++) {
+				k = c "|" order[j]
+				if (k in cnt) printf " %s:%d:%d", order[j], cnt[k], now - last[k]
+			}
+			print ""
+		}
+		for (j = 1; j <= oa; j++)
+			if (order[j] in app_sum)
+				printf "APP %s %d %d\n", order[j], app_sum[order[j]], now - app_last[order[j]]
+		printed = 0
+		for (d in udom) ntot++
+		while (printed < 30 && printed < ntot) {
+			best = ""; bc = -1
+			for (d in udom)
+				if (udom[d] > bc) { bc = udom[d]; best = d }
+			if (best == "") break
+			printf "UNK %s %d %d\n", best, udom[best], now - ulast[best]
+			delete udom[best]
+			printed++
+		}
+	}
+' "$DB")
+
+hostname_of() {
+	awk -v ip="$1" '$3 == ip { print $4; exit }' /tmp/dhcp.leases 2>/dev/null
+}
+
+blocked_list=""
+i=0
+while uci -q get nrapp.@app[$i] >/dev/null 2>&1; do
+	[ "$(uci -q get nrapp.@app[$i].blocked)" = "1" ] && \
+		blocked_list="$blocked_list $(uci -q get nrapp.@app[$i].app)"
+	i=$((i + 1))
+done
+
+# ---------- emit ----------
+json_init
+json_add_int "now" "$now"
+json_add_string "enabled" "$(uci -q get nrapp.global.enabled || echo 1)"
+json_add_boolean "running" $(pgrep -f "nr-apptrack --daemon" >/dev/null 2>&1 && echo 1 || echo 0)
+json_add_string "log_enabled" "$(uci -q get dhcp.@dnsmasq[0].logqueries || echo 0)"
+
+json_add_array "apps"
+i=0
+while :; do
+	id=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].id" 2>/dev/null)
+	[ -z "$id" ] && [ "$i" -gt 0 ] && break
+	[ -z "$id" ] && break
+	name=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].name" 2>/dev/null)
+	cat_=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].cat" 2>/dev/null)
+	json_add_object ""
+	json_add_string "id" "$id"
+	json_add_string "name" "$name"
+	json_add_string "cat" "$cat_"
+	json_close_object
+	i=$((i + 1))
+done
+json_close_array
+
+json_add_array "blocked"
+for b in $blocked_list; do
+	json_add_string "" "$b"
+done
+json_close_array
+
+PA=$(printf '%s\n' "$stats" | sed -n 's/^APP \([^ ]*\) \([0-9]*\) \([0-9]*\)$/\1 \2 \3/p')
+json_add_array "per_app"
+while read -r app cnt ago; do
+	[ -n "$app" ] || continue
+	json_add_object ""
+	json_add_string "app" "$app"
+	json_add_int "queries" "$cnt"
+	json_add_int "last_ago" "$ago"
+	json_close_object
+done <<NRAPP_EOF
+$PA
+NRAPP_EOF
+json_close_array
+
+CL=$(printf '%s\n' "$stats" | sed -n 's/^CLIENT \([^ ]*\)\(.*\)$/\1|\2/p')
+json_add_array "clients"
+while IFS='|' read -r ip pairs; do
+	[ -n "$ip" ] || continue
+	json_add_object ""
+	json_add_string "ip" "$ip"
+	json_add_string "name" "$(hostname_of "$ip")"
+	json_add_array "apps"
+	for p in $pairs; do
+		json_add_object ""
+		json_add_string "app" "${p%%:*}"
+		rest=${p#*:}
+		json_add_int "queries" "${rest%%:*}"
+		json_add_int "last_ago" "${rest##*:}"
+		json_close_object
+	done
+	json_close_array
+	json_close_object
+done <<NRAPP_EOF
+$CL
+NRAPP_EOF
+json_close_array
+
+UK=$(printf '%s\n' "$stats" | sed -n 's/^UNK \([^ ]*\) \([0-9]*\) \([0-9]*\)$/\1 \2 \3/p')
+json_add_array "unknown_top"
+while read -r dom cnt ago; do
+	[ -n "$dom" ] || continue
+	json_add_object ""
+	json_add_string "domain" "$dom"
+	json_add_int "queries" "$cnt"
+	json_add_int "last_ago" "$ago"
+	json_close_object
+done <<NRAPP_EOF
+$UK
+NRAPP_EOF
+json_close_array
+
+json_dump
