@@ -170,8 +170,7 @@ jobs:
           - **有线、散热与系统**：\`LAN = eth1\`（片内 2.5G PHY）、\`WAN = eth0\`（Airoha \`EN8811H\` 2.5G PHY）、静音温控风扇曲线（\`<65 °C\` 停转，\`65 / 75 / 85 °C\` 渐进调速 + \`AT^CHIPTEMP?\` 5G 模组高温联动散热）、\`zram-swap\`（\`1 GiB\` DDR4 下 \`50%\` 自适应 \`493 MiB\` \`lzo-rle\` 压缩交换 + \`swappiness=100\`）、\`uboot-envtools\` 严格 CRC32 校验探测与 \`c2000-bootswitch\` 双系统安全切换工具，预装完整汉化 **LuCI**（含 \`luci-i18n-base-zh-cn\`、\`luci-i18n-firewall-zh-cn\`、\`luci-i18n-package-manager-zh-cn\`、\`luci-ssl\`、\`luci-proto-ncm\`、\`iw-full\`、\`pciutils\`、\`usbutils\`、\`picocom\`）。
 
           ### 刷入、SSH 登录与双系统切换说明
-          - **首次切换为独立配置**：从旧版 OpenWrt 或 Mwrt 先导出需要保留的设置，再切回原厂，从「双系统」页面把完整固件写入 TF 卡。此步骤会更新 TF 内核及设备树并初始化 TF 配置区。旧版 OpenWrt 的在线升级只更新根文件系统，旧版的「清除配置升级」还会尝试擦除板载配置区。
-          - **后续从配置已隔离的 OpenWrt 升级**：同内核版本可用「在线固件更新」。保留配置和清除配置都只针对 TF 卡上的 OpenWrt。同一设备的原厂设置继续使用板载闪存。
+          - **同内核版本在线升级**：同内核版本可用「在线固件更新」。保留配置和清除配置都只针对 TF 卡上的 OpenWrt。同一设备的原厂设置继续使用板载闪存。
           - **首次登录与 SSH 说明**：默认管理地址 \`http://192.168.1.1\`（首次网页登录 \`root\` 无密码）。净刷后 Dropbear 允许空密码 \`root\` SSH 首登（LuCI 不可用时的救援通道），**登录后请立即在网页「系统 → 管理权」或 SSH \`passwd\` 设置密码**；若本机此前连过 \`192.168.1.1\` 提示密钥变更，先执行 \`ssh-keygen -R 192.168.1.1\` 再连接。
           - **从原厂双系统固件刷入**：插好已分区 TF 卡后，在原厂双系统切换/升级页面上传该 \`sysupgrade.bin\`（未签名 \`ustar\` \`compat_version 1.0\`，内置 \`NRadio-C2000MAX-798\` / \`NRadio-C2000MAX-Ultra\` / \`NRadio-C2000Ultra\` / \`nradio,c2000-ultra\` 兼容板名与 \`0x40080000\` FIT 入口）。
           - **双系统无损切回原厂固件**：在 LuCI「系统 → 双系统切换」页面一键切换（推荐），或在 OpenWrt SSH 中执行 \`c2000-bootswitch to-factory && reboot\`（自动校验 SPI-NOR \`u-boot-env\` CRC32 并将 \`boot_from_sd\` 设为 \`0\`，无需拔出 TF 卡）。

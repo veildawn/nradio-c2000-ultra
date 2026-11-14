@@ -50,25 +50,8 @@ def main() -> None:
     dts_dst = root / "target/linux/mediatek/dts/mt7987a-nradio-c2000ultra.dts"
     shutil.copyfile(dts_src, dts_dst)
 
-    # 2. Remove Astryx files left by an earlier board patch before copying base-files.
+    # 2. Install board files in the Filogic base-files tree.
     base_files = root / "target/linux/mediatek/filogic/base-files"
-    for relative_path in (
-        "etc/uci-defaults/90-nradio-astryx-ui",
-        "usr/share/luci/menu.d/nradio-astryx.json",
-        "usr/share/ucode/luci/template/nradio/astryx.ut",
-        "www/luci-static/resources/astryx-frame.js",
-        "www/luci-static/resources/menu-astryx.js",
-    ):
-        (base_files / relative_path).unlink(missing_ok=True)
-    for relative_path in (
-        "usr/share/ucode/luci/template/themes/astryx",
-        "www/luci-static/astryx",
-    ):
-        path = base_files / relative_path
-        if path.is_symlink():
-            path.unlink()
-        elif path.is_dir():
-            shutil.rmtree(path)
     copy_board_files(board_dir / "files", base_files)
 
     # 3. Register or update Device/nradio_c2000-ultra in filogic.mk
