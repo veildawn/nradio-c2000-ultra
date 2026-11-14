@@ -15,7 +15,7 @@ class ModemTests(unittest.TestCase):
         start = SOURCE.index('CFUN="" CPIN=')
         end = SOURCE.index('\nreg_stat()', start)
         code = 'RAW=' + shlex.quote(raw) + '\n' + SOURCE[start:end]
-        fields = ['CFUN', 'CPIN', 'IMSI', 'ICCID', 'COPS', 'CSQ', 'HCSQ', 'HCSQV', 'CEREG', 'C5GREG', 'SCICHG', 'CHIPTEMP']
+        fields = ['CFUN', 'CPIN', 'IMSI', 'ICCID', 'COPS', 'CSQ', 'HCSQ', 'HCSQV', 'CEREG', 'C5GREG', 'SCICHG', 'CHIPTEMP', 'IMEI']
         code += "\nprintf '%s\\n' " + ' '.join('"$' + f + '"' for f in fields)
         res = subprocess.run(['sh', '-c', code], capture_output=True, text=True, check=True)
         return dict(zip(fields, res.stdout.splitlines()))
@@ -34,9 +34,11 @@ OK
 ^SCICHG: 1,0
 ^CHIPTEMP: 65535,610,730
 +CFUN: 1
+867123456789012
 OK''')
         self.assertEqual(result['CPIN'], 'READY')
         self.assertEqual(result['IMSI'], '460060123456789')
+        self.assertEqual(result['IMEI'], '867123456789012')
         self.assertEqual(result['ICCID'], '89860601234567890000')
         self.assertEqual((result['HCSQ'], result['HCSQV']), ('NR', '54,170,26'))
         self.assertEqual(result['CHIPTEMP'], '65535,610,730')

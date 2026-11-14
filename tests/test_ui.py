@@ -178,10 +178,29 @@ class UITests(unittest.TestCase):
     def test_modem_bad_first_response_still_renders_settings(self):
         self.page.evaluate("fake.fail = 'modem'")
         self.mount('modem')
+        self.page.get_by_text('设置', exact=True).click()
         self.assertTrue(self.page.locator('form').is_visible())
         self.assertIn('自动重试', self.page.locator('#mt5700_meta').inner_text())
         self.page.evaluate("fake.fail = ''; fake.modem.enabled = '0'; current.refreshStatus()")
         self.assertIn('已关闭', self.page.locator('#mt5700_modem').inner_text())
+
+    def test_new_cellular_tabs_quota_and_qos_survive_merge(self):
+        self.page.evaluate("""Object.assign(fake.modem, {
+            qos: {qci:'9',dl_ambr_kbps:'100000',ul_ambr_kbps:'50000',apn:'3gnet'},
+            pdp: {addr4:'10.0.0.2'},
+            traffic: {mon_rx:104857600,mon_tx:0,limit_mb:200,reset_day:15}
+        })""")
+        self.mount('modem')
+        self.page.get_by_text('SIM 与 QoS', exact=True).click()
+        self.assertIn('QCI/5QI 9', self.page.locator('#mt5700_qci').inner_text())
+        self.assertIn('100', self.page.locator('#mt5700_ambrdl').inner_text())
+        self.page.evaluate('fake.modem.stamp_age = 90; current.refreshStatus()')
+        self.assertEqual(self.page.locator('#mt5700_ambrdl').inner_text(), '—')
+        self.assertEqual(self.page.locator('#mt5700_pdp4').inner_text(), '—')
+        self.page.get_by_text('流量统计', exact=True).click()
+        self.assertIn('50%', self.page.locator('#mt5700_quota').inner_text())
+        self.page.get_by_text('设置', exact=True).click()
+        self.assertTrue(self.page.evaluate('!!fields.netmode && !!fields.traffic_limit_mb && !!fields.traffic_reset_day && !!fields.traffic_action'))
 
     def test_pending_boot_target_has_reboot_and_cancel_actions(self):
         self.page.evaluate("fake.boot = '0'")
