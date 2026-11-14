@@ -8,6 +8,7 @@
 #   - 3-route SIM mux (External SIM1, External SIM2, built-in eSIM) via cpe-sel0 + AT^SCICHG
 #   - IMSI -> carrier APN auto-provisioning & netifd wwan health supervision
 #   - AT^CHIPTEMP? 12-sensor thermal guard boosting PWM fan well before 97 C CFUN cutoff
+#   - Per-tick read-only AT status stamp for LuCI (/usr/sbin/mt5700-status)
 
 . /lib/functions.sh
 . /usr/share/libubox/jshn.sh
@@ -21,6 +22,7 @@ NVRAM_STAMP="/tmp/mt5700.nvram_checked"
 PWR_RESCUE_STAMP="/tmp/mt5700.pwr_rescue"
 SLOT_STAMP="/tmp/mt5700.active_slot"
 TEMP_STAMP="/tmp/mt5700.chip_temp"
+STATUS_RAW_STAMP="/tmp/mt5700.status.raw"
 FAN_BOOST_STAMP="/tmp/mt5700.fan_boost"
 THERM_TICK_STAMP="/tmp/mt5700.therm_tick"
 
@@ -411,6 +413,10 @@ switch_sim_slot() {
 		return 0
 	fi
 
+	# Invalidate the LuCI status stamp first: from this moment any previously
+	# captured SIM/signal data belongs to the old slot and must not be shown.
+	rm -f "$STATUS_RAW_STAMP"
+
 	log "Switching SIM route to $slot (cpe-sel0=$sel_gpio, SCICHG=$scichg)"
 	gpio_set cpe-sel0 "$sel_gpio"
 	at_cmd "$MODEM_AT" "AT^SCICHG=$scichg" >/dev/null
@@ -526,6 +532,22 @@ wwan_is_pending() {
 	ubus call network.interface.wwan status 2>/dev/null | grep -q '"pending":[[:space:]]*true'
 }
 
+# Refresh the raw AT status stamp consumed by /usr/sbin/mt5700-status (LuCI).
+# Runs under the daemon lock early in each tick so the web UI gets fresh data
+# without ever contending for the PCUI port; skipped while ncm.sh is dialing.
+refresh_status_raw() {
+	local out
+	[ -c "$MODEM_AT" ] || return 1
+	wwan_is_pending && return 1
+	# "^" AT commands must ride env vars: gcom script literals eat ^X as control escapes
+	out=$(CMD_ICCID='AT^ICCID?' CMD_HCSQ='AT^HCSQ?' CMD_SCICHG='AT^SCICHG?' CMD_CHIPTEMP='AT^CHIPTEMP?' \
+		timeout 30 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
+	case "$out" in
+	*OK*) printf '%s\n' "$out" > "$STATUS_RAW_STAMP" ;;
+	*) return 1 ;;
+	esac
+}
+
 bringup_once() {
 	local enabled sim_slot cfg_apn usb3_retrain fix_nvram thermal_guard
 	config_load mt5700
@@ -538,6 +560,7 @@ bringup_once() {
 
 	if [ "$enabled" != "1" ]; then
 		set_cellular_leds 0 0
+		rm -f "$STATUS_RAW_STAMP"
 		return 0
 	fi
 
@@ -551,6 +574,7 @@ bringup_once() {
 	if ! wait_for_modem 35; then
 		if ! cold_power_cycle_modem "3466:3301 absent on USB bus"; then
 			set_cellular_leds 0 0
+			rm -f "$STATUS_RAW_STAMP"
 			return 1
 		fi
 	fi
@@ -561,6 +585,10 @@ bringup_once() {
 	if wwan_is_pending; then
 		return 0
 	fi
+
+	# Snapshot AT state for the LuCI status page before the (possibly long)
+	# SIM probe / registration paths below hold the port for minutes.
+	refresh_status_raw || true
 
 	ensure_modem_nvram "$fix_nvram" || return 1
 
@@ -609,6 +637,10 @@ bringup_once() {
 		[ "$uci_dirty" = "1" ] && uci commit network
 		return 1
 	fi
+
+	# A route switch just invalidated the stamp: capture fresh SIM state
+	# immediately instead of leaving the LuCI page in 检测中 until the next tick.
+	[ -f "$STATUS_RAW_STAMP" ] || refresh_status_raw || true
 
 	imsi=$(at_cmd "$MODEM_AT" "AT+CIMI" | tr -cd '0-9' | head -c 15)
 	auto_apn=$(apn_from_imsi "$imsi")
@@ -678,8 +710,25 @@ run_locked_once() {
 }
 
 run_daemon() {
-	local interval
-	trap 'release_lock; exit 0' INT TERM
+	local interval opid
+	DAEMON_LOCKDIR="/var/lock/mt5700.daemon"
+
+	# Duplicate-instance guard: a previous daemon stuck in an uninterruptible
+	# AT port read can survive procd's SIGKILL and then race this instance for
+	# the tick lock. mkdir is atomic, so only one daemon can ever hold the
+	# lock dir; a stale dir whose recorded pid is dead is reclaimed.
+	if ! mkdir "$DAEMON_LOCKDIR" 2>/dev/null; then
+		opid=$(cat "$DAEMON_LOCKDIR/pid" 2>/dev/null | tr -cd '0-9')
+		if [ -n "$opid" ] && [ "$opid" != "$$" ] && kill -0 "$opid" 2>/dev/null; then
+			log "Refusing to start: another mt5700 daemon (pid $opid) is already running"
+			return 1
+		fi
+		rm -rf "$DAEMON_LOCKDIR"
+		mkdir "$DAEMON_LOCKDIR" 2>/dev/null || return 1
+	fi
+	echo $$ > "$DAEMON_LOCKDIR/pid"
+
+	trap 'rm -rf "$DAEMON_LOCKDIR"; release_lock; exit 0' INT TERM
 	while true; do
 		if acquire_lock; then
 			bringup_once

@@ -1,0 +1,19 @@
+{
+	"luci-app-nradio-c2000": {
+		"description": "Grant access to NRadio C2000 Ultra 5G modem and dual-boot management",
+		"read": {
+			"file": {
+				"/usr/sbin/mt5700-status": [ "exec" ]
+			},
+			"uci": [ "mt5700" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/c2000-bootswitch": [ "exec" ],
+				"/usr/sbin/mt5700-status": [ "exec" ],
+				"/sbin/reboot": [ "exec" ]
+			},
+			"uci": [ "mt5700" ]
+		}
+	}
+}
