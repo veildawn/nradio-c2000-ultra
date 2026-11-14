@@ -388,11 +388,11 @@ return view.extend({
 				rows.push([n, v]);
 			});
 			/* humanize hex identifiers */
-			['小区标识', '物理小区标识', '跟踪区', '位置区'].forEach(function(key) {
-				rows.forEach(function(r) {
-					if (r[0].indexOf(key) >= 0 && /^[0-9A-Fa-f]+$/.test(String(r[1])))
-						r[1] = '%s (0x%s)'.format(parseInt(r[1], 16), r[1]);
-				});
+			/* decimal-looking identifiers (e.g. a digits-only PCI) stay as-is;
+			 * only values that visibly carry hex letters get humanized */
+			rows.forEach(function(r) {
+				if (/[A-Fa-f]/.test(String(r[1])) && /^[0-9A-Fa-f]+$/.test(String(r[1])))
+					r[1] = '%s (0x%s)'.format(parseInt(r[1], 16), r[1]);
 			});
 			rows.push(['PLMN', '%s-%s'.format(vals[0], vals[1])]);
 		}
@@ -458,11 +458,10 @@ return view.extend({
 			C.pdp6.textContent = '—';
 		}
 		C.cids.textContent = (st.pdp && st.pdp.active_cids) ? 'CID %s'.format(st.pdp.active_cids) : '—';
-		var ndis = (st.pdp && st.pdp.ndis) || '';
 		var nd = [];
-		if (ndis.indexOf('IPV4') >= 0) nd.push('IPv4 ✓');
-		if (ndis.indexOf('IPV6') >= 0) nd.push('IPv6 ✓');
-		C.ndis.textContent = nd.length ? nd.join(' ｜ ') : '—';
+		if (st.pdp && st.pdp.addr4) nd.push('IPv4 ✓'); else nd.push('IPv4 ✗');
+		if (st.pdp && st.pdp.addr6) nd.push('IPv6 ✓'); else nd.push('IPv6 ✗');
+		C.ndis.textContent = nd.join(' ｜ ');
 		var mode = { '080302': '自动（5G 优先）', '08': '仅 5G NR', '03': '仅 LTE', '0302': '仅 LTE/3G' };
 		C.syscfg.textContent = mode[st.syscfg] || st.syscfg || '—';
 		C.nwtime.textContent = st.nwtime || '—（网络未下发时间）';
@@ -665,6 +664,7 @@ return view.extend({
 
 		var o = s3.option(form.Value, 'traffic_reset_day', '账期重置日（几号）', '每月第几号结转流量账目（1–31；短月自动按月末处理），默认 1 号。');
 		o.placeholder = '1';
+		o.default = '1';
 		o.rmempty = false;
 		o.datatype = 'and(uinteger,min(1),max(31))';
 

@@ -687,9 +687,11 @@ traffic_over_limit() {
 	limit_mb=$(uci -q get mt5700.modem.traffic_limit_mb | tr -cd '0-9')
 	[ -n "$limit_mb" ] || return 1
 	[ "$limit_mb" -gt 0 ] || return 1
-	[ -f "$TRAFFIC_DB" ] || return 1
+	local qdb=/tmp/mt5700.traffic.db
+	[ -f "$qdb" ] || qdb="$TRAFFIC_DB"
+	[ -f "$qdb" ] || return 1
 	local mon_rx=0 mon_tx=0
-	eval "$(sed -n 's/^\(mon_rx\|mon_tx\)=\([0-9]*\)$/\1=\2/p' "$TRAFFIC_DB")"
+	eval "$(sed -n 's/^\(mon_rx\|mon_tx\)=\([0-9]*\)$/\1=\2/p' "$qdb")"
 	used=$(( (mon_rx + mon_tx) / 1048576 ))
 	[ "$used" -ge "$limit_mb" ] || return 1
 	action=$(uci -q get mt5700.modem.traffic_action)
@@ -705,19 +707,21 @@ apply_traffic_reset() {
 	[ -n "$marker" ] || return 0
 	uci -q delete mt5700.modem.traffic_reset
 	uci commit mt5700
-	if [ -f "$TRAFFIC_DB" ]; then
+	local vdb=/tmp/mt5700.traffic.db
+	for f in "$TRAFFIC_DB" "$vdb"; do
+		[ -f "$f" ] || continue
 		case "$marker" in
 		day)
-			sed -i 's/^day_rx=.*/day_rx=0/; s/^day_tx=.*/day_tx=0/' "$TRAFFIC_DB"
+			sed -i 's/^day_rx=.*/day_rx=0/; s/^day_tx=.*/day_tx=0/' "$f"
 			;;
 		month)
-			sed -i 's/^day_rx=.*/day_rx=0/; s/^day_tx=.*/day_tx=0/; s/^mon_rx=.*/mon_rx=0/; s/^mon_tx=.*/mon_tx=0/' "$TRAFFIC_DB"
+			sed -i 's/^day_rx=.*/day_rx=0/; s/^day_tx=.*/day_tx=0/; s/^mon_rx=.*/mon_rx=0/; s/^mon_tx=.*/mon_tx=0/' "$f"
 			;;
 		*)
-			rm -f "$TRAFFIC_DB"
+			rm -f "$f"
 			;;
 		esac
-	fi
+	done
 	log "Traffic statistics reset ($marker) requested from LuCI"
 }
 

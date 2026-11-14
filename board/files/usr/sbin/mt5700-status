@@ -133,9 +133,17 @@ DSAMBR_DL=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,\([0-9]*\),\([0-
 DSAMBR_UL=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,\([0-9]*\),\([0-9]*\).*/\2/p' | tail -n 1)
 DSAMBR_APN=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,[0-9]*,[0-9]*,"\([^"]*\)".*/\1/p' | tail -n 1)
 
-# PDP addresses (AT+CGPADDR): cid,"v4"[,"v6-IA5"]
-CGPADDR4=$(printf '%s\n' "$RAW" | sed -n 's/^+CGPADDR: *[0-9]*,"\([0-9.]*\)".*/\1/p' | tail -n 1)
-CGPADDR6=$(printf '%s\n' "$RAW" | sed -n 's/^+CGPADDR: *[0-9]*,"[0-9.]*","\([0-9.]*\)".*/\1/p' | tail -n 1)
+# PDP addresses (AT+CGPADDR): each line carries one or two quoted IA5
+# addresses; classify by octet count (IPv4 = 4 parts, IPv6-IA5 = 16 parts)
+read -r CGPADDR4 CGPADDR6 <<EOF
+$(printf '%s\n' "$RAW" | awk -F'"' '/^\+CGPADDR:/ {
+	for (i = 2; i <= NF; i += 2) {
+		n = split($i, parts, ".")
+		if (n == 4 && !v4) v4 = $i
+		else if (n > 4 && !v6) v6 = $i
+	}
+} END { printf "%s %s\n", v4, v6 }')
+EOF
 
 # IMEI (standalone 15-digit reply to AT+GSN)
 IMEI=$(printf '%s\n' "$RAW" | grep -E '^[0-9]{15}$' | tail -n 1)
@@ -418,8 +426,13 @@ T_LIVE_RX=""; T_LIVE_TX=""; T_UPTIME=""
 }
 T_UPTIME=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e '@.uptime' 2>/dev/null)
 [ -f "$TRAFFIC_DB" ] && eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$TRAFFIC_DB")"
-T_SESS_RX=$(( ${T_LIVE_RX:-0} - $(sed -n 's/^base_rx=//p' /tmp/mt5700.session 2>/dev/null | tr -cd '0-9') ))
-T_SESS_TX=$(( ${T_LIVE_TX:-0} - $(sed -n 's/^base_tx=//p' /tmp/mt5700.session 2>/dev/null | tr -cd '0-9') ))
+T_BASE_RX=$(sed -n 's/^base_rx=//p' /tmp/mt5700.session 2>/dev/null | tr -cd '0-9')
+T_BASE_TX=$(sed -n 's/^base_tx=//p' /tmp/mt5700.session 2>/dev/null | tr -cd '0-9')
+: "${T_BASE_RX:=0}" "${T_BASE_TX:=0}"
+T_SESS_RX=$(( ${T_LIVE_RX:-0} - T_BASE_RX ))
+T_SESS_TX=$(( ${T_LIVE_TX:-0} - T_BASE_TX ))
+[ "$T_SESS_RX" -ge 0 ] 2>/dev/null || T_SESS_RX=0
+[ "$T_SESS_TX" -ge 0 ] 2>/dev/null || T_SESS_TX=0
 [ "$T_SESS_RX" -ge 0 ] 2>/dev/null || T_SESS_RX=0
 [ "$T_SESS_TX" -ge 0 ] 2>/dev/null || T_SESS_TX=0
 json_add_object "traffic"
