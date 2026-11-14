@@ -126,6 +126,18 @@ class UITests(unittest.TestCase):
         self.page.wait_for_function('!current.checking')
         self.assertTrue(self.page.get_by_role('button', name='下载固件到路由器').is_enabled())
 
+    def test_system_views_center_in_the_available_content_width(self):
+        for view, selector in (('bootswitch', '.nr-bs'), ('upgrade', '.nr-up')):
+            with self.subTest(view=view):
+                self.mount(view)
+                content = self.page.locator(selector)
+                for viewport_width in (1440, 390):
+                    self.page.set_viewport_size({'width': viewport_width, 'height': 844})
+                    bounds = content.bounding_box()
+                    self.assertAlmostEqual(bounds['x'] + bounds['width'] / 2, viewport_width / 2, delta=1)
+                    self.assertEqual(self.page.evaluate('document.documentElement.scrollWidth'), viewport_width)
+                content.evaluate('node => node.remove()')
+
     def test_download_restore_progress_rpc_error_and_completion(self):
         self.page.evaluate("fake.status = {state: 'downloading', bytes: 512, total: 1024, tag: 'v-old'}")
         self.mount('upgrade')
