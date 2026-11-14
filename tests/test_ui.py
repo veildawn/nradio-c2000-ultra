@@ -215,6 +215,86 @@ class UITests(unittest.TestCase):
         self.assertTrue(self.page.get_by_role('button', name='立即重启进入原厂系统…').is_visible())
         self.page.get_by_role('button', name='取消切换，保持 OpenWrt').click()
         self.page.get_by_role('button', name='切换到原厂系统…').wait_for()
+        self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'), 390)
+
+    def test_modem_privacy_mask_band_inference_and_mobile_layout(self):
+        self.page.evaluate("""Object.assign(fake.modem, {
+            usb_speed: '480',
+            imei: '864920061940318',
+            sim: { phase: 'ready', state_cn: '已就绪', configured_slot: 'auto', slot: 'sim1',
+                   imsi: '460010928378821', iccid: '89860123801190284910', carrier: '中国联通' },
+            signal: { sysmode: 'NR', rsrp_dbm: '-81', sinr_dc: '195', rsrq_dc: '-95' },
+            cell: { rat: 'NR', raw: '460,01,627264,1,1A2B3C01,312,3104,-81,-9,-19' }
+        })""")
+        self.mount('modem')
+        self.assertIn('USB 2.0', self.page.locator('.nr-md-banner').inner_text())
+        self.assertIn('46001******8821', self.page.locator('#mt5700_imsi').inner_text())
+        self.assertNotIn('460010928378821', self.page.locator('#mt5700_imsi').inner_text())
+        self.page.get_by_role('button', name='显示完整标识').click()
+        self.assertIn('460010928378821', self.page.locator('#mt5700_imsi').inner_text())
+        self.assertIn('864920061940318', self.page.locator('#mt5700_imei').inner_text())
+        self.page.evaluate("""() => {
+            Object.defineProperty(navigator, 'clipboard', {value: undefined});
+            document.execCommand = command => {
+                window.copied = document.activeElement.value;
+                return command === 'copy';
+            };
+        }""")
+        imsi = self.page.locator('#mt5700_imsi .nr-md-copychip').filter(has_text='IMSI:')
+        imsi.get_by_role('button', name='复制', exact=True).click()
+        self.assertEqual(self.page.evaluate('window.copied'), '460010928378821')
+        self.assertIn('已复制', imsi.get_by_role('status').inner_text())
+        self.page.get_by_role('button', name='隐藏敏感标识').click()
+        self.assertNotIn('460010928378821', self.page.locator('#mt5700_imsi').inner_text())
+
+        for tab in ('总览', '小区与信号', 'SIM 与 QoS', '流量统计', '设置'):
+            self.page.get_by_role('tab', name=tab, exact=True).click()
+            self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'), 390)
+
+        self.page.get_by_role('tab', name='小区与信号', exact=True).click()
+        self.assertIn('Band n78 (3.5 GHz TDD)', self.page.locator('#mt5700_cellrat').inner_text())
+        self.assertIn('30 kHz', self.page.locator('#mt5700_celltable').inner_text())
+        self.assertIn('0x1A2B3C01', self.page.locator('#mt5700_celltable').inner_text())
+
+    def test_upgrade_presets_and_mobile_layout(self):
+        self.page.evaluate("fake.fail = 'check'; void 0;")
+        self.mount('upgrade')
+        self.page.wait_for_function('!current.checking')
+        self.assertIn('v1.0.0', self.page.locator('body').inner_text())
+        self.assertIn('r38253-e2ed57b957', self.page.locator('body').inner_text())
+        self.assertIn('检查失败', self.page.locator('body').inner_text())
+        self.assertIn('暂未获取远端版本', self.page.locator('body').inner_text())
+        self.assertEqual(
+            self.page.get_by_role('link', name='本地上传 / 备份').get_attribute('href'),
+            '/cgi-bin/luci/admin/system/flash'
+        )
+        self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'), 390)
+
+        self.page.evaluate("""() => {
+            fake.fail = '';
+            Object.assign(fake.release, {
+                tag: 'v1.0.0',
+                rev: 'r38253-e2ed57b957',
+                same_base: 1,
+                kernel_match: 1,
+                sha256: 'f0854d139c4a2e8b0d112233445566778899aabbccddeeff0011223344815770',
+                notes: '## 更新重点\\n- 优化在线固件更新中心'
+            });
+            return current.handleCheck(true);
+        }""")
+        self.assertIn('当前已是最新', self.page.locator('body').inner_text())
+        self.assertIn('f0854d139c…44815770', self.page.locator('body').inner_text())
+        self.page.get_by_role('button', name='展开更新日志').click()
+        self.assertIn('优化在线固件更新中心', self.page.locator('body').inner_text())
+        self.page.get_by_role('button', name='收起更新日志').click()
+
+        self.page.get_by_role('button', name='ghfast 加速源').click()
+        self.assertEqual(self.page.get_by_label('下载加速前缀（可选）').input_value(), 'https://ghfast.top/')
+        self.page.get_by_role('button', name='加速镜像示例').click()
+        self.assertEqual(self.page.get_by_label('下载加速前缀（可选）').input_value(), 'https://gh-proxy.com/')
+        self.page.get_by_role('button', name='GitHub 官方直连').click()
+        self.assertEqual(self.page.get_by_label('下载加速前缀（可选）').input_value(), '')
+        self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'), 390)
 
 
 if __name__ == '__main__':
