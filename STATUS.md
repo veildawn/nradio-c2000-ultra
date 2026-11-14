@@ -30,6 +30,8 @@
 
 在线更新实测记录（2026-11-14，联通 5G 出口）：`api.github.com` 可达（含 IPv6 AAAA）；`github.com` release 下载域名全系 v4-only 且直连被墙——页面提供可选「下载加速前缀」（如 `https://ghfast.top/`，实测免费通道限速 ~10 KB/s 不可用，其他网络环境/有线 WAN 直连即可）；固件完整性始终以 API digest 校验（实测 ghfast 镜像内容哈希与 API digest 一致）。刷新页面自动恢复已下载就绪态。
 
+**在线升级通道（OpenWrt 自身 sysupgrade）根因修复**：上游 `emmc_do_upgrade` 依赖 `find_mmc_part` 按 uevent `PARTNAME` 解析分区，而 TF 卡 GPT 分区不暴露该属性 → `EMMC_ROOT_DEV` 为空 → **写分区被整体跳过、仅重启**（本机此前全部经原厂 Web 刷入，该路径从未被触发过）。修复为 nradio 专有分支直写 `EMMC_ROOT_DEV=/dev/mmcblk0p4`（`root=PARTLABEL=rootfs` 实际所在，`/proc/self/mountinfo` 179:4 实证），kernel 分区 `mmcblk0p3`（原厂 boot 镜像格式，仅原厂刷机工具会重新打包 FIT）不动——因此**跨内核版本的 Release 会被在线更新页拒绝**（Release 名携带 `Linux <ver>` 与 `uname -r` 比对），需走原厂 Web 刷入。`-n` 不保留配置升级在分支内追加 `mtd erase rootfs_data` 清 NOR overlay（否则旧 `/etc/config` 会存活）。注意：保留配置升级会重建 overlay 且仅恢复 `/etc`——对 overlay 的任何热修改都不会存活，修复必须进固件。首个完整自升级版本 **`v2026.11.14-5-r38246`**（`v3`/`v4` 为 tag 误打在旧 main 的退化构建，已删除）；上游 ImageBuilder 已滚动至 `r38253-e2ed57b957`（内核 vermagic `0011ea4d...` 不变，在线升级兼容）。截至该版本，全部 15 条 PR review 意见（5×P1、10×P2）已修复并实机验证。
+
 状态数据链路（注网被拒与 NR 双场景实机验证）：`mt5700-bringup` 每周期在持锁段开头执行一次只读 AT 批量采集（`/etc/gcom/mt5700-status.gcom`）写 `/tmp/mt5700.status.raw`；`mt5700-status` 优先读 stamp（零 AT 竞争），stamp 过期（>45s）且锁空闲时机会式直采。一致性语义参考原厂 ROM「按需实时查询」：切卡瞬间删除 stamp、`SLOT_STAMP` 晚于数据即判过渡态、CPIN 空且非过渡判「未检测到 SIM 卡」、stamp 超过 2×巡检间隔数值降级为「—」——UI 永不拿过期数据冒充当前状态。
 
 MT5700M-CN AT/gcom 实测坑（均已内置规避）：Balong AT 解析器不接受背靠背命令（必须逐条交互采集）；gcom 脚本字面 `send` 中 `^X` 是控制符转义（`^` 命令必须经 `$env()` 传入）；`+CSQ` 在 NR 模式返回空（信号以 `^HCSQ` 为准）；busybox 无 `stat(1)`（用 `date -r` 取 mtime）；`jsonfilter` 布尔输出 `true/false`、带连字符键名需 `@['ipv4-address']` 引号语法；gcom 偶发退出段错误（按输出内容判有效性）。守护进程新增 **mkdir 原子锁防双实例**（实测事故：procd SIGKILL 后 D 状态孤儿与 respawn 新实例竞争 tick 锁）。
