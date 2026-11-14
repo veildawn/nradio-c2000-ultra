@@ -1,6 +1,6 @@
 import React from "react";
 import type { MenuNode } from "./model";
-export function Icon({ name, size = 20 }: { name: string; size?: number }) {
+export function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, React.ReactNode> = {
     overview: (
       <>
@@ -57,6 +57,11 @@ export function Icon({ name, size = 20 }: { name: string; size?: number }) {
         <circle cx="12" cy="20" r=".7" />
       </>
     ),
+    ethernet: (
+      <>
+        <path d="M4 5h16v11h-4v4H8v-4H4ZM8 5v5m4-5v5m4-5v5" />
+      </>
+    ),
     system: (
       <>
         <rect x="4" y="4" width="16" height="12" rx="2" />
@@ -81,7 +86,7 @@ export function Icon({ name, size = 20 }: { name: string; size?: number }) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.65"
+      strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -98,7 +103,7 @@ export function Brand() {
         n<span>▹</span>
       </span>
       <span>
-        NRadio<small>NETWORK OS</small>
+        NRadio<small>OpenWrt</small>
       </span>
     </span>
   );
