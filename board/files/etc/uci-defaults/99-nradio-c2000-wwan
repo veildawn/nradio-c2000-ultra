@@ -11,10 +11,6 @@ if ! uci -q get network.wwan >/dev/null; then
 	uci set network.wwan.delay='5'
 	uci set network.wwan.metric='20'
 	uci set network.wwan.ipv6='auto'
-else
-	# Clean up legacy invalid literals if upgrading with config preserved
-	[ "$(uci -q get network.wwan.apn)" = "auto" ] && uci -q delete network.wwan.apn
-	[ "$(uci -q get network.wwan.mode)" = "auto" ] && uci -q delete network.wwan.mode
 fi
 
 # 1b. Human-readable labels so the LuCI Interfaces page explains the

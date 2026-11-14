@@ -1,5 +1,5 @@
-# The TF kernel's DTB must keep the factory image opaque. An upgrade
-# from an old release may have replaced only the rootfs, leaving an old DTB.
+# Require the TF root and an opaque, read-only factory image partition
+# before OpenWrt can select a writable overlay.
 nradio_tf_overlay_guard() {
 	[ "$(board_name)" = "nradio,c2000-ultra" ] || return 0
 	local tf_dev
