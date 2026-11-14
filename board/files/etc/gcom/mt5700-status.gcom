@@ -1,0 +1,56 @@
+opengt
+ set com 115200n81
+ set comecho off
+ set senddelay 0.02
+ waitquiet 0.2 0.2
+ flash 0.1
+
+# Interactive read-only status sweep for MT5700M-CN, consumed by
+# /usr/sbin/mt5700-status (via the mt5700-bringup daemon stamp or direct exec).
+# - Commands must be sent one at a time: the Balong AT parser drops input when
+#   several commands arrive back-to-back (single ERROR observed).
+# - "^" prefixed TD Tech commands (AT^HCSQ? ...) MUST be passed through
+#   $env(): in gcom script literals "^X" is a control-character escape
+#   (^m = CR, ^H = BS, ...) which corrupts the command. Callers export
+#   CMD_HCSQ / CMD_ICCID / CMD_SCICHG / CMD_CHIPTEMP with the full AT string.
+ send "AT+CFUN?"
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send "AT+CPIN?"
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send "AT+CIMI"
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send $env("CMD_ICCID")
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send "AT+COPS?"
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send $env("CMD_HCSQ")
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send "AT+CEREG?"
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send "AT+C5GREG?"
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send $env("CMD_SCICHG")
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ send $env("CMD_CHIPTEMP")
+ send "^m"
+ get 0.5 "" $s
+ print $s
+ exit 0

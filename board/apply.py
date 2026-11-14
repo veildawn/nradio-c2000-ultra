@@ -170,16 +170,30 @@ TARGET_DEVICES += nradio_c2000-ultra
             )
             ubenv_path.write_text(ubenv_text)
 
-    # 5. Update platform.sh (GPT kernel/rootfs emmc upgrade + ustar check + copy_config)
+    # 5. Update platform.sh (GPT rootfs-only emmc upgrade + ustar check + copy_config)
     plat_path = root / "target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"
     plat_text = plat_path.read_text()
     if "nradio,c2000-ultra" not in plat_text:
+        # Dedicated do_upgrade branch: find_mmc_part cannot resolve TF-card
+        # GPT labels (no uevent PARTNAME), so write the rootfs partition
+        # directly and leave the vendor boot-image kernel partition alone.
         do_anchor = "\thuasifei,wh3000-pro-emmc|\\\n"
         if do_anchor not in plat_text:
             sys.exit("ERROR: platform_do_upgrade anchor missing in platform.sh")
         plat_text = plat_text.replace(
             do_anchor,
-            do_anchor + "\tnradio,c2000-ultra|\\\n",
+            "\tnradio,c2000-ultra)\n"
+            "\t\t# TF GPT labels are not exposed via uevent PARTNAME, so\n"
+            "\t\t# find_mmc_part resolves nothing; write the squashfs rootfs\n"
+            "\t\t# partition directly and leave the vendor boot-image kernel\n"
+            "\t\t# partition untouched (only the factory flasher repackages\n"
+            "\t\t# FIT kernels into it; online updates are same-kernel only).\n"
+            "\t\t# A no-config upgrade must also wipe the persistent NOR\n"
+            "\t\t# rootfs_data overlay, or old /etc/config would survive.\n"
+            "\t\t[ \"${SAVE_CONFIG:-1}\" = \"0\" ] && mtd erase rootfs_data >/dev/null 2>&1\n"
+            "\t\texport EMMC_ROOT_DEV=\"/dev/mmcblk0p4\"\n"
+            "\t\temmc_do_upgrade \"$1\"\n"
+            "\t\t;;\n" + do_anchor,
             1,
         )
 

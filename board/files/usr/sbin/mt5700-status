@@ -1,0 +1,353 @@
+#!/bin/sh
+# NRadio C2000 Ultra MT5700M-CN status snapshot for LuCI (luci-app-nradio-c2000).
+# Emits JSON consumed by /www/luci-static/resources/view/nradio/modem.js.
+#
+# Data sources, in priority order:
+#   1. /tmp/mt5700.status.raw refreshed every mt5700-bringup daemon tick (default)
+#   2. Opportunistic direct AT sweep when the daemon lock is free and the stamp
+#      is stale (covers a stopped/disabled daemon); never blocks >1s on the lock
+#   3. Always fresh regardless of AT state: USB enumeration, netdev carrier,
+#      ubus wwan/wwan_4/wwan_6 status, UCI configuration
+#
+# HCSQ value decoding follows the MT5700M-CN AT command manual 13.5:
+#   rssi/rscp(WCDMA): dBm = N-121 (0..96, 255 unknown)
+#   ecio: 0.1dB units = 5*N-325 (0..65)
+#   rsrp(LTE/NR): dBm = N-141 (0..97)
+#   sinr: 0.1dB units = 2*(N-1)-200 (0..251)
+#   rsrq: 0.1dB units = 5*N-200 (0..34)
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+LOCKFILE="/var/lock/mt5700.lock"
+RAW_STAMP="/tmp/mt5700.status.raw"
+SLOT_STAMP="/tmp/mt5700.active_slot"
+TEMP_STAMP="/tmp/mt5700.chip_temp"
+STALE_AFTER=45
+
+MODEM_SPEED=""
+MODEM_NET=""
+MODEM_AT=""
+
+find_modem_usb() {
+	local d vid pid n
+	for d in /sys/bus/usb/devices/*; do
+		[ -f "$d/idVendor" ] && [ -f "$d/idProduct" ] || continue
+		vid=$(cat "$d/idVendor" 2>/dev/null)
+		pid=$(cat "$d/idProduct" 2>/dev/null)
+		[ "$vid" = "3466" ] && [ "$pid" = "3301" ] || continue
+		MODEM_SPEED=$(cat "$d/speed" 2>/dev/null | tr -d ' \r\n')
+		for n in "$d":*/net/*; do
+			[ -d "$n" ] && MODEM_NET=$(basename "$n")
+		done
+		return 0
+	done
+	return 1
+}
+
+stamp_age() {
+	local m now
+	# busybox has no stat(1); date -r FILE +%s gives mtime epoch
+	m=$(date -r "$RAW_STAMP" +%s 2>/dev/null | tr -cd '0-9')
+	[ -n "$m" ] || { echo 999999; return; }
+	now=$(date +%s)
+	echo $((now - m))
+}
+
+RAW=""
+SOURCE="none"
+BUSY=0
+AGE=999999
+
+find_modem_usb
+MODEM_AT=$(uci -q get network.wwan.device)
+[ -c "$MODEM_AT" ] || MODEM_AT=""
+
+RAW=$(cat "$RAW_STAMP" 2>/dev/null)
+AGE=$(stamp_age)
+
+wwan_is_pending() {
+	ubus call network.interface.wwan status 2>/dev/null | grep -q '"pending":[[:space:]]*true'
+}
+
+if [ -n "$MODEM_AT" ] && { [ -z "$RAW" ] || [ "$AGE" -gt "$STALE_AFTER" ]; }; then
+	# Never sweep while netifd's ncm.sh owns the AT port: it does not take
+	# our private lock, and interleaving a 30s sweep with a dial attempt
+	# can break registration (same guard as refresh_status_raw).
+	if wwan_is_pending; then
+		BUSY=1
+	elif lock -n "$LOCKFILE" 2>/dev/null; then
+		# gcom occasionally segfaults on exit after printing valid output,
+		# so validity is judged by content (*OK*) rather than exit status
+		out=$(CMD_ICCID='AT^ICCID?' CMD_HCSQ='AT^HCSQ?' CMD_SCICHG='AT^SCICHG?' CMD_CHIPTEMP='AT^CHIPTEMP?' \
+			timeout 30 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
+		case "$out" in
+		*OK*)
+			printf '%s\n' "$out" > "$RAW_STAMP"
+			RAW="$out"
+			SOURCE="direct"
+			AGE=0
+			;;
+		esac
+		lock -u "$LOCKFILE" 2>/dev/null
+	else
+		BUSY=1
+	fi
+fi
+
+[ -n "$RAW" ] && [ "$SOURCE" != "direct" ] && SOURCE="daemon"
+
+# ---- parse raw AT burst (last matching line wins; URC noise tolerated) ----
+# Note: TD Tech "^" responses carry a literal caret prefix ('\^HCSQ: ...').
+CFUN=$(printf '%s\n' "$RAW" | sed -n 's/^+CFUN: *\([0-9]*\).*/\1/p' | tail -n 1)
+CPIN=$(printf '%s\n' "$RAW" | sed -n 's/^+CPIN: *//p' | tail -n 1)
+IMSI=$(printf '%s\n' "$RAW" | grep -E '^[0-9]{15}$' | tail -n 1)
+ICCID=$(printf '%s\n' "$RAW" | sed -n 's/^\^ICCID: *\([0-9A-Fa-f]*\).*/\1/p' | tail -n 1)
+COPS=$(printf '%s\n' "$RAW" | sed -n 's/^+COPS: *//p' | tail -n 1)
+CSQ=$(printf '%s\n' "$RAW" | sed -n 's/^+CSQ: *\([0-9]*\),*\([0-9]*\).*/\1 \2/p' | tail -n 1)
+HCSQ=$(printf '%s\n' "$RAW" | sed -n 's/^\^HCSQ: *"\([A-Z]*\)".*/\1/p' | tail -n 1)
+HCSQV=$(printf '%s\n' "$RAW" | sed -n 's/^\^HCSQ: *"[A-Z]*",\([0-9,]*\).*/\1/p' | tail -n 1)
+CEREG=$(printf '%s\n' "$RAW" | sed -n 's/^+CEREG: *//p' | tail -n 1)
+C5GREG=$(printf '%s\n' "$RAW" | sed -n 's/^+C5GREG: *//p' | tail -n 1)
+SCICHG=$(printf '%s\n' "$RAW" | sed -n 's/^\^SCICHG: *\([0-9],[0-9]\).*/\1/p' | tail -n 1)
+CHIPTEMP=$(printf '%s\n' "$RAW" | sed -n 's/^\^CHIPTEMP: *//p' | tail -n 1)
+
+reg_stat() {
+	case "$1" in
+	0) echo "未注册（未搜索）" ;;
+	1) echo "已注册（本地网）" ;;
+	2) echo "搜索运营商中" ;;
+	3) echo "注册被拒（denied）" ;;
+	4) echo "未知" ;;
+	5) echo "已注册（漫游）" ;;
+	*) echo "" ;;
+	esac
+}
+
+act_name() {
+	case "$1" in
+	0) echo "GSM" ;;
+	2) echo "WCDMA" ;;
+	3) echo "EGPRS" ;;
+	4) echo "HSDPA" ;;
+	5) echo "HSUPA" ;;
+	6) echo "HSPA" ;;
+	7) echo "LTE" ;;
+	8) echo "EC-GSM-IoT" ;;
+	9) echo "NB-IoT" ;;
+	10) echo "E-UTRA (5GC)" ;;
+	11) echo "NR (5GC)" ;;
+	12) echo "NG-RAN" ;;
+	13) echo "NE-DC" ;;
+	*) echo "" ;;
+	esac
+}
+
+carrier_from_imsi() {
+	case "$1" in
+	46000*|46002*|46004*|46007*|46008*|46013*) echo "中国移动" ;;
+	46001*|46006*|46009*|46010*) echo "中国联通" ;;
+	46003*|46005*|46011*|46012*) echo "中国电信" ;;
+	46015*) echo "中国广电" ;;
+	*) echo "" ;;
+	esac
+}
+
+# CSQ: rssi 0..31 -> dBm = -113+2*N (99 unknown)
+CSQ_RSSI=$(echo "$CSQ" | cut -d' ' -f1)
+CSQ_BER=$(echo "$CSQ" | cut -d' ' -f2)
+CSQ_DBM=""
+case "$CSQ_RSSI" in
+''|99) ;;
+*) [ "$CSQ_RSSI" -le 31 ] 2>/dev/null && CSQ_DBM=$((2 * CSQ_RSSI - 113)) ;;
+esac
+
+# HCSQ decode (values as documented in the header comment)
+H_RSSI=""; H_RSRP=""; H_SINR_DC=""; H_RSRQ_DC=""; H_RSCP=""; H_ECIO_DC=""
+h_val() { echo "$HCSQV" | cut -d, -f"$1" | tr -cd '0-9'; }
+if [ -n "$HCSQV" ] && [ -n "$HCSQ" ]; then
+	case "$HCSQ" in
+	GSM)
+		v=$(h_val 1); case "$v" in ''|255) ;; *) H_RSSI=$((v - 121)) ;; esac
+		;;
+	WCDMA)
+		v=$(h_val 1); case "$v" in ''|255) ;; *) H_RSSI=$((v - 121)) ;; esac
+		v=$(h_val 2); case "$v" in ''|255) ;; *) H_RSCP=$((v - 121)) ;; esac
+		v=$(h_val 3); case "$v" in ''|255) ;; *) H_ECIO_DC=$((5 * v - 325)) ;; esac
+		;;
+	LTE)
+		v=$(h_val 1); case "$v" in ''|255) ;; *) H_RSSI=$((v - 121)) ;; esac
+		v=$(h_val 2); case "$v" in ''|255) ;; *) H_RSRP=$((v - 141)) ;; esac
+		v=$(h_val 3); case "$v" in ''|255) ;; *) H_SINR_DC=$((2 * (v - 1) - 200)) ;; esac
+		v=$(h_val 4); case "$v" in ''|255) ;; *) H_RSRQ_DC=$((5 * v - 200)) ;; esac
+		;;
+	NR)
+		v=$(h_val 1); case "$v" in ''|255) ;; *) H_RSRP=$((v - 141)) ;; esac
+		v=$(h_val 2); case "$v" in ''|255) ;; *) H_SINR_DC=$((2 * (v - 1) - 200)) ;; esac
+		v=$(h_val 3); case "$v" in ''|255) ;; *) H_RSRQ_DC=$((5 * v - 200)) ;; esac
+		;;
+	esac
+fi
+
+# CEREG / C5GREG: <n>,<stat>[,<tac>,<ci>,<AcT>]
+CEREG_STAT=$(echo "$CEREG" | cut -d, -f2)
+CEREG_ACT=$(echo "$CEREG" | cut -d, -f5)
+C5GREG_STAT=$(echo "$C5GREG" | cut -d, -f2)
+C5GREG_ACT=$(echo "$C5GREG" | cut -d, -f5)
+CEREG_ACT_N=$(act_name "$CEREG_ACT")
+C5GREG_ACT_N=$(act_name "$C5GREG_ACT")
+
+# COPS: <mode>[,<format>,<oper>[,<AcT>]]
+COPS_OPER=""
+COPS_ACT_N=""
+COPS_NF=$(echo "$COPS" | awk -F, '{ print NF }')
+if [ "${COPS_NF:-0}" -ge 3 ] 2>/dev/null; then
+	COPS_OPER=$(echo "$COPS" | cut -d, -f3 | tr -d '"')
+	COPS_ACT_N=$(act_name "$(echo "$COPS" | cut -d, -f4)")
+fi
+
+# CHIPTEMP: max of valid 0.1C sensors (65535/absent = error)
+TEMP_DC=""
+if [ -n "$CHIPTEMP" ]; then
+	TEMP_DC=$(echo "$CHIPTEMP" | tr ',' '\n' | tr -cd '0-9\n-\n' | awk '
+		{ v = $1 + 0 }
+		v >= -400 && v <= 1250 && (v > m || n == 0) { m = v; n = 1 }
+		END { if (n) print int(m) }')
+fi
+[ -n "$TEMP_DC" ] || TEMP_DC=$(cat "$TEMP_STAMP" 2>/dev/null | tr -cd '0-9-')
+
+# ---- always-fresh runtime facts ----
+ACTIVE_SLOT=$(cat "$SLOT_STAMP" 2>/dev/null | tr -d ' \r\n')
+
+# Transition detection: a SIM route switch after the last successful sweep
+# invalidates the captured SIM/signal data (it belongs to the previous slot).
+# mt5700-bringup removes the raw stamp on switch; comparing both mtimes also
+# covers the window before the next sweep could run.
+SLOT_MTIME=$(date -r "$SLOT_STAMP" +%s 2>/dev/null | tr -cd '0-9')
+RAW_MTIME=$(date -r "$RAW_STAMP" +%s 2>/dev/null | tr -cd '0-9')
+SIM_TRANSITION=0
+if [ -n "$SLOT_MTIME" ] && [ -z "$RAW_MTIME" ]; then
+	SIM_TRANSITION=1
+elif [ -n "$SLOT_MTIME" ] && [ -n "$RAW_MTIME" ] && [ "$SLOT_MTIME" -gt "$RAW_MTIME" ]; then
+	SIM_TRANSITION=1
+fi
+
+# SIM presence state machine (factory-ROM style explicit states)
+case "$CPIN" in
+"READY")
+	SIM_PHASE="ready"
+	SIM_STATE_CN="已就绪"
+	;;
+"SIM PIN")
+	SIM_PHASE="pin"
+	SIM_STATE_CN="需要输入 PIN 码"
+	;;
+"SIM PUK")
+	SIM_PHASE="puk"
+	SIM_STATE_CN="需要输入 PUK 码"
+	;;
+"")
+	if [ "$SIM_TRANSITION" = "1" ]; then
+		SIM_PHASE="switching"
+		SIM_STATE_CN="正在切换 SIM 卡…"
+	else
+		SIM_PHASE="absent"
+		SIM_STATE_CN="未检测到 SIM 卡"
+	fi
+	IMSI=""
+	ICCID=""
+	;;
+*)
+	SIM_PHASE="other"
+	SIM_STATE_CN="$CPIN"
+	;;
+esac
+
+SEL_GPIO=$(cat /sys/class/gpio/cpe-sel0/value 2>/dev/null | tr -d ' \r\n')
+CARRIER_LINK=""
+[ -n "$MODEM_NET" ] && CARRIER_LINK=$(cat "/sys/class/net/$MODEM_NET/carrier" 2>/dev/null | tr -d ' \r\n')
+
+# jsonfilter renders JSON booleans as true/false
+wwan_up() { ubus call network.interface.wwan status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null; }
+wwan_pending() { ubus call network.interface.wwan status 2>/dev/null | jsonfilter -e '@.pending' 2>/dev/null; }
+# jsonfilter needs quoted keys for hyphenated JSON members
+WWAN4_IP=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e "@['ipv4-address'][0].address" 2>/dev/null)
+WWAN6_IP=$(ubus call network.interface.wwan_6 status 2>/dev/null | jsonfilter -e "@['ipv6-address'][0].address" 2>/dev/null)
+[ "$(wwan_up)" = "true" ] && WWAN_UP=1 || WWAN_UP=0
+[ "$(wwan_pending)" = "true" ] && WWAN_PENDING=1 || WWAN_PENDING=0
+
+CFG_ENABLED=$(uci -q get mt5700.modem.enabled)
+CFG_SLOT=$(uci -q get mt5700.modem.sim_slot)
+CFG_APN=$(uci -q get mt5700.modem.apn)
+# show the effective APN actually dialed (mt5700.modem.apn may be empty = auto)
+[ -n "$CFG_APN" ] || CFG_APN=$(uci -q get network.wwan.apn)
+[ -n "$CFG_ENABLED" ] || CFG_ENABLED=1
+[ -n "$CFG_SLOT" ] || CFG_SLOT=auto
+CFG_INTERVAL=$(uci -q get mt5700.modem.check_interval)
+[ -n "$CFG_INTERVAL" ] || CFG_INTERVAL=30
+
+# ---- emit JSON ----
+json_init
+json_add_boolean "present" $([ -n "$MODEM_SPEED" ] && echo 1 || echo 0)
+json_add_string "usb_speed" "$MODEM_SPEED"
+json_add_string "at_port" "$MODEM_AT"
+json_add_string "netdev" "$MODEM_NET"
+json_add_int "carrier_link" "${CARRIER_LINK:-0}"
+json_add_boolean "busy" "$BUSY"
+json_add_string "source" "$SOURCE"
+json_add_int "stamp_age" "$AGE"
+json_add_string "cfun" "$CFUN"
+
+json_add_object "sim"
+json_add_string "state" "$CPIN"
+json_add_string "state_cn" "$SIM_STATE_CN"
+json_add_string "phase" "$SIM_PHASE"
+json_add_int "transition" "$SIM_TRANSITION"
+json_add_string "slot" "$ACTIVE_SLOT"
+json_add_string "configured_slot" "$CFG_SLOT"
+json_add_string "slot_gpio" "$SEL_GPIO"
+json_add_string "scichg" "$SCICHG"
+json_add_string "imsi" "$IMSI"
+json_add_string "iccid" "$ICCID"
+json_add_string "carrier" "$(carrier_from_imsi "$IMSI")"
+json_close_object
+
+json_add_object "signal"
+json_add_string "sysmode" "$HCSQ"
+json_add_string "csq_rssi" "$CSQ_RSSI"
+json_add_string "csq_ber" "$CSQ_BER"
+json_add_string "csq_dbm" "$CSQ_DBM"
+json_add_string "rssi_dbm" "$H_RSSI"
+json_add_string "rscp_dbm" "$H_RSCP"
+json_add_string "rsrp_dbm" "$H_RSRP"
+json_add_string "sinr_dc" "$H_SINR_DC"
+json_add_string "rsrq_dc" "$H_RSRQ_DC"
+json_add_string "ecio_dc" "$H_ECIO_DC"
+json_close_object
+
+json_add_object "reg"
+json_add_string "cereg_stat" "$CEREG_STAT"
+json_add_string "cereg_state" "$(reg_stat "$CEREG_STAT")"
+json_add_string "cereg_act" "$CEREG_ACT_N"
+json_add_string "c5greg_stat" "$C5GREG_STAT"
+json_add_string "c5greg_state" "$(reg_stat "$C5GREG_STAT")"
+json_add_string "c5greg_act" "$C5GREG_ACT_N"
+json_add_string "operator" "$COPS_OPER"
+json_add_string "operator_act" "$COPS_ACT_N"
+json_close_object
+
+json_add_object "wwan"
+json_add_boolean "up" "$WWAN_UP"
+json_add_boolean "pending" "$WWAN_PENDING"
+json_add_string "ip4" "$WWAN4_IP"
+json_add_string "ip6" "$WWAN6_IP"
+json_close_object
+
+json_add_string "temp_dc" "$TEMP_DC"
+json_add_string "enabled" "$CFG_ENABLED"
+json_add_string "apn" "$CFG_APN"
+json_add_int "check_interval" "$CFG_INTERVAL"
+
+json_dump
