@@ -43,10 +43,6 @@ def main() -> None:
         else Path(__file__).resolve().parent
     )
 
-    for asset in ("astryx.js", "astryx.css", "THIRD-PARTY-NOTICES.txt"):
-        if not (board_dir / "files/www/luci-static/astryx" / asset).is_file():
-            sys.exit("Astryx assets are missing. Run npm --prefix ui/astryx ci && npm --prefix ui/astryx run build first.")
-
     # 1. Copy board DTS
     dts_src = board_dir / "mt7987a-nradio-c2000ultra.dts"
     dts_dst = root / "target/linux/mediatek/dts/mt7987a-nradio-c2000ultra.dts"

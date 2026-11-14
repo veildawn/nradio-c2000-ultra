@@ -66,14 +66,7 @@ python3 -m unittest discover -s tests -v
 
 ## 编译与定制打包方式
 
-先构建 Astryx 管理界面（Node.js 24，在本仓库根目录运行）：
-
-```bash
-npm --prefix ui/astryx ci
-npm --prefix ui/astryx run build
-```
-
-固件默认启用 Astryx 单页管理外壳：移动端固定五个底部 Tab，原生总览和分类卡片，支持搜索、浅色/深色模式、返回与滚动恢复。现有 LuCI 管理详情及插件通过同源 iframe 兼容层访问，保留认证、权限和配置回滚逻辑；不是全部业务页面的 React 重写。新界面尚未上机验收；架构、预览、单独安装及恢复说明见 [ui/astryx/README.md](ui/astryx/README.md)。下面两种打包方式均检查构建资源，GitHub Actions 会自动完成此步骤。
+固件默认使用官方 LuCI 的 Bootstrap 主题。5G 蜂窝、应用管控、双系统切换和在线固件更新仍可从 LuCI 菜单打开。
 
 ### 方式一：官方 ImageBuilder 极速定制打包（推荐，约 30 秒）
 
