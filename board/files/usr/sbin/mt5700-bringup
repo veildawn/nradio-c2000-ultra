@@ -541,15 +541,208 @@ refresh_status_raw() {
 	wwan_is_pending && return 1
 	# "^" AT commands must ride env vars: gcom script literals eat ^X as control escapes
 	out=$(CMD_ICCID='AT^ICCID?' CMD_HCSQ='AT^HCSQ?' CMD_SCICHG='AT^SCICHG?' CMD_CHIPTEMP='AT^CHIPTEMP?' \
-		timeout 30 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
+		CMD_MONSC='AT^MONSC' CMD_NDIS='AT^NDISSTATQRY?' CMD_CFG='AT^SYSCFGEX?' CMD_NWTIME='AT^NWTIME?' \
+		CMD_DSAMBR='AT^DSAMBR=1' \
+		timeout 40 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
 	case "$out" in
 	*OK*) printf '%s\n' "$out" > "$STATUS_RAW_STAMP" ;;
 	*) return 1 ;;
 	esac
 }
 
+# Persistent traffic accounting (day / billing-period / total buckets) fed
+# from the modem netdev kernel counters; survives reboots in
+# /etc/mt5700/traffic.db. The monthly bucket follows a configurable billing
+# anchor day (uci mt5700.modem.traffic_reset_day): the period containing date
+# D runs from anchor-day in D's month (or the previous month when D is before
+# the anchor) up to the day before the next anchor.
+TRAFFIC_DB="/etc/mt5700/traffic.db"
+
+traffic_reset_day() {
+	local rd
+	rd=$(uci -q get mt5700.modem.traffic_reset_day | tr -cd '0-9')
+	case "$rd" in
+	""|0) echo 1 ;;
+	*) [ "$rd" -ge 1 ] && [ "$rd" -le 31 ] && echo "$rd" || echo 1 ;;
+	esac
+}
+
+traffic_days_in_month() {
+	# $1=YYYY $2=MM -> last day (Gregorian leap rules)
+	local y=$1 m=$2
+	case "$m" in
+	01|03|05|07|08|10|12) echo 31 ;;
+	04|06|09|11) echo 30 ;;
+	02)
+		if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then
+			echo 29
+		else
+			echo 28
+		fi
+		;;
+	esac
+}
+
+traffic_period_key() {
+	# prints "<anchorY>-<anchorM>:<rd>" for the billing period containing today
+	local rd y m d ldm anchor_d ay am
+	rd=$(traffic_reset_day)
+	y=$(date +%Y); m=$(date +%m); d=$(date +%d)
+	ldm=$(traffic_days_in_month "$y" "$m")
+	# effective anchor day when the month is shorter than the configured day
+	[ "$rd" -le "$ldm" ] && anchor_d=$rd || anchor_d=$ldm
+	if [ "${d#0}" -ge "$anchor_d" ]; then
+		echo "$y-$m:$rd"
+	else
+		case "$m" in
+		01) ay=$((y - 1)); am=12 ;;
+		*)  ay=$y; am=$(printf '%02d' $(( ${m#0} - 1 ))) ;;
+		esac
+		echo "$ay-$am:$rd"
+	fi
+}
+
+record_traffic() {
+	local net="$MODEM_NET" rx tx now day mon
+	local day_rx day_tx mon_rx mon_tx tot_rx tot_tx last_rx last_tx
+	[ -n "$net" ] && [ -d "/sys/class/net/$net/statistics" ] || return 0
+	rx=$(cat "/sys/class/net/$net/statistics/rx_bytes" 2>/dev/null | tr -cd '0-9')
+	tx=$(cat "/sys/class/net/$net/statistics/tx_bytes" 2>/dev/null | tr -cd '0-9')
+	[ -n "$rx" ] && [ -n "$tx" ] || return 0
+	now=$(date +%s)
+	day=$(date +%Y-%m-%d)
+	mon=$(traffic_period_key)
+
+	# volatile working copy; checkpoints to NOR at most every 10 minutes
+	# (or after 1 MiB of new traffic) to spare the rootfs_data overlay
+	local vdb=/tmp/mt5700.traffic.db
+	[ -f "$vdb" ] || cp "$TRAFFIC_DB" "$vdb" 2>/dev/null
+	if [ -f "$vdb" ]; then
+		eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$vdb")"
+	fi
+	day_rx=${day_rx:-0}; day_tx=${day_tx:-0}
+	mon_rx=${mon_rx:-0}; mon_tx=${mon_tx:-0}
+	tot_rx=${tot_rx:-0}; tot_tx=${tot_tx:-0}
+	old_day=${day_key:-$day}
+	old_mon=${mon_key:-$mon}
+
+	# first sighting (fresh db / cleared totals): adopt current counters as
+	# the baseline without crediting historic session bytes to any bucket
+	if [ -z "${last_rx:-}" ] || [ -z "${last_tx:-}" ]; then
+		last_rx=$rx; last_tx=$tx
+	fi
+
+	# calendar / billing-period rollovers zero their buckets regardless of
+	# whether the counters are monotonic across the boundary
+	[ "$old_day" != "$day" ] && { day_rx=0; day_tx=0; }
+	[ "$old_mon" != "$mon" ] && { mon_rx=0; mon_tx=0; }
+
+	# deltas vs last sample; counter reset / iface rebuild -> resync only
+	if [ "$rx" -ge "${last_rx:-0}" ] && [ "$tx" -ge "${last_tx:-0}" ]; then
+		local drx=$((rx - last_rx)) dtx=$((tx - last_tx))
+		day_rx=$((day_rx + drx)); day_tx=$((day_tx + dtx))
+		mon_rx=$((mon_rx + drx)); mon_tx=$((mon_tx + dtx))
+		tot_rx=$((tot_rx + drx)); tot_tx=$((tot_tx + dtx))
+	fi
+	last_rx=$rx; last_tx=$tx
+
+	printf 'day_key=%s\nmon_key=%s\nday_rx=%d\nday_tx=%d\nmon_rx=%d\nmon_tx=%d\ntot_rx=%d\ntot_tx=%d\nlast_rx=%s\nlast_tx=%s\nupdated=%s\n' \
+		"$day" "$mon" "$day_rx" "$day_tx" "$mon_rx" "$mon_tx" "$tot_rx" "$tot_tx" "$rx" "$tx" "$now" > "$vdb"
+
+	# checkpoint policy: every 600s or after 1 MiB of new traffic
+	local ckpt_at="" ckpt_tot=0
+	if [ -f "$TRAFFIC_DB" ]; then
+		ckpt_at=$(sed -n 's/^updated=//p' "$TRAFFIC_DB" | tail -n 1)
+		ckpt_tot=$(( $(sed -n 's/^tot_rx=//p' "$TRAFFIC_DB" | tail -n 1) + $(sed -n 's/^tot_tx=//p' "$TRAFFIC_DB" | tail -n 1) ))
+	fi
+	if [ -z "$ckpt_at" ] || [ $((now - ckpt_at)) -ge 600 ] || [ $((tot_rx + tot_tx - ckpt_tot)) -ge 1048576 ]; then
+		mkdir -p /etc/mt5700
+		cp "$vdb" "$TRAFFIC_DB"
+	fi
+}
+
+# Per-connection session baseline: when wwan_4 uptime drops, the data
+# connection restarted -- rebase "session traffic" to the current one.
+record_session_baseline() {
+	local net="$MODEM_NET" up rx tx prev_up=999999999
+	[ -n "$net" ] || return 0
+	up=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e '@.uptime' 2>/dev/null)
+	[ -n "$up" ] || return 0
+	rx=$(cat "/sys/class/net/$net/statistics/rx_bytes" 2>/dev/null | tr -cd '0-9')
+	tx=$(cat "/sys/class/net/$net/statistics/tx_bytes" 2>/dev/null | tr -cd '0-9')
+	local f=/tmp/mt5700.session
+	[ -f "$f" ] && prev_up=$(sed -n 's/^uptime=//p' "$f")
+	if [ ! -f "$f" ] || [ "$up" -lt "$prev_up" ]; then
+		printf 'uptime=%s\nbase_rx=%s\nbase_tx=%s\n' "$up" "${rx:-0}" "${tx:-0}" > "$f"
+	else
+		sed -i "s/^uptime=.*/uptime=$up/" "$f"
+	fi
+}
+
+# Returns 0 when a configured monthly limit is exceeded (billing-period
+# bucket). Enforcement ('offline') tears the session down and gates dialing;
+# 'notify' only reports through mt5700-status for the LuCI badge.
+traffic_over_limit() {
+	local limit_mb action used
+	limit_mb=$(uci -q get mt5700.modem.traffic_limit_mb | tr -cd '0-9')
+	[ -n "$limit_mb" ] || return 1
+	[ "$limit_mb" -gt 0 ] || return 1
+	local qdb=/tmp/mt5700.traffic.db
+	[ -f "$qdb" ] || qdb="$TRAFFIC_DB"
+	[ -f "$qdb" ] || return 1
+	local mon_rx=0 mon_tx=0
+	eval "$(sed -n 's/^\(mon_rx\|mon_tx\)=\([0-9]*\)$/\1=\2/p' "$qdb")"
+	used=$(( (mon_rx + mon_tx) / 1048576 ))
+	[ "$used" -ge "$limit_mb" ] || return 1
+	action=$(uci -q get mt5700.modem.traffic_action)
+	[ "$action" = "offline" ] || return 2
+	return 0
+}
+
+# Honor the UI "clear traffic statistics" marker: wipe the requested bucket
+# range and drop the marker so it only acts once.
+apply_traffic_reset() {
+	local marker
+	marker=$(uci -q get mt5700.modem.traffic_reset)
+	[ -n "$marker" ] || return 0
+	uci -q delete mt5700.modem.traffic_reset
+	uci commit mt5700
+	local vdb=/tmp/mt5700.traffic.db
+	for f in "$TRAFFIC_DB" "$vdb"; do
+		[ -f "$f" ] || continue
+		case "$marker" in
+		day)
+			sed -i 's/^day_rx=.*/day_rx=0/; s/^day_tx=.*/day_tx=0/' "$f"
+			;;
+		month)
+			sed -i 's/^day_rx=.*/day_rx=0/; s/^day_tx=.*/day_tx=0/; s/^mon_rx=.*/mon_rx=0/; s/^mon_tx=.*/mon_tx=0/' "$f"
+			;;
+		*)
+			rm -f "$f"
+			;;
+		esac
+	done
+	log "Traffic statistics reset ($marker) requested from LuCI"
+}
+
+# Optional network-mode preference from the UI: keep the modem's ^SYSCFGEX
+# AcT-order string in sync (auto "080302" / NR only "08" / LTE only "03").
+apply_netmode() {
+	local want="$1" cur wantstr
+	case "$want" in
+	nr) wantstr="08" ;;
+	lte) wantstr="03" ;;
+	*) wantstr="080302" ;;
+	esac
+	[ -c "$MODEM_AT" ] || return 0
+	cur=$(at_cmd "$MODEM_AT" "AT^SYSCFGEX?" | sed -n 's/.*SYSCFGEX:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -n 1)
+	[ "$cur" = "$wantstr" ] && return 0
+	log "Applying network mode '$want' (^SYSCFGEX \"$wantstr\", was \"${cur:-?}\")"
+	at_cmd "$MODEM_AT" "AT^SYSCFGEX=\"$wantstr\",3fffffff,2,4,7fffffffffffffff,," >/dev/null
+}
+
 bringup_once() {
-	local enabled sim_slot cfg_apn usb3_retrain fix_nvram thermal_guard
+	local enabled sim_slot cfg_apn usb3_retrain fix_nvram thermal_guard netmode
 	config_load mt5700
 	config_get_bool enabled modem enabled 1
 	config_get sim_slot modem sim_slot "auto"
@@ -557,6 +750,9 @@ bringup_once() {
 	config_get_bool usb3_retrain modem usb3_retrain 1
 	config_get_bool fix_nvram modem fix_nvram 1
 	config_get_bool thermal_guard modem thermal_guard 1
+	config_get netmode modem netmode "auto"
+
+	apply_traffic_reset
 
 	if [ "$enabled" != "1" ]; then
 		# Honor the "cut power & stop dialing" contract: tear the session
@@ -594,6 +790,31 @@ bringup_once() {
 	# Snapshot AT state for the LuCI status page before the (possibly long)
 	# SIM probe / registration paths below hold the port for minutes.
 	refresh_status_raw || true
+
+	# Account traffic before anything below may reshuffle the netdev
+	record_traffic
+	record_session_baseline
+
+	# Monthly quota gate: 'offline' action tears the session down and stops
+	# dialing until the billing period rolls over or the limit is lifted
+	traffic_over_limit
+	case $? in
+	0)
+		ifdown wwan >/dev/null 2>&1
+		set_cellular_leds 0 0
+		if [ ! -f /tmp/mt5700.traffic_gate ]; then
+			touch /tmp/mt5700.traffic_gate
+			log "Monthly traffic limit reached; cellular set offline until next billing period (uci mt5700.modem.traffic_*)"
+		fi
+		return 0
+		;;
+	*)
+		rm -f /tmp/mt5700.traffic_gate
+		;;
+	esac
+
+	# Optional UI network-mode preference (nr/lte/auto)
+	apply_netmode "$netmode"
 
 	ensure_modem_nvram "$fix_nvram" || return 1
 
