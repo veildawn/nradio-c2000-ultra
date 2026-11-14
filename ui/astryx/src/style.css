@@ -246,9 +246,11 @@ body.nr-spa { overflow: hidden; }
 @media (max-width: 1050px) and (min-width: 901px) { .nr-spa #maincontent { left: 216px; }.nr-nav-notice { left: calc(50% + 108px); } }
 @media (max-width: 900px) {
   .nr-spa .nr-sidebar { display: none; }
-  .nr-spa .nr-topbar { height: calc(64px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 16px 0; }
+  .nr-spa .nr-topbar { height: calc(64px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(16px,env(safe-area-inset-right)) 0 max(16px,env(safe-area-inset-left)); }
   .nr-mobile-mark { display: grid; place-items: center; width: 32px; height: 32px; background: var(--nr-accent); color: var(--nr-surface); font-size: 26px; font-weight: 700; font-style: italic; border-radius: 10px; }
-  .nr-spa #maincontent { inset: calc(64px + env(safe-area-inset-top)) 0 calc(68px + env(safe-area-inset-bottom)); }
+  .nr-spa #maincontent { inset: calc(64px + env(safe-area-inset-top)) env(safe-area-inset-right) calc(68px + env(safe-area-inset-bottom)) env(safe-area-inset-left); }
+  .astryx-ui input, .astryx-ui select, .astryx-ui textarea { font-size: 16px; }
+  .nr-spa .nr-topbar .astryx-button, .nr-embedded .cbi-button { min-height: 44px; min-width: 44px; }
   .nr-spa #maincontent > .alert-message { margin: 8px 12px 0; font-size: 12px; padding: 10px; }
   .nr-bottom-tabs { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); position: fixed; bottom: 0; left: 0; right: 0; height: calc(68px + env(safe-area-inset-bottom)); padding: 6px max(8px,env(safe-area-inset-right)) env(safe-area-inset-bottom) max(8px,env(safe-area-inset-left)); background: var(--nr-surface); border-top: 1px solid var(--nr-line); z-index: 40; }
   .nr-bottom-tabs a { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 2px; min-width: 44px; min-height: 50px; font-size: 10px; line-height: 1.5; font-weight: 500; color: var(--nr-muted); -webkit-tap-highlight-color: transparent; }
