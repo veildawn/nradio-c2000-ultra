@@ -51,6 +51,7 @@ window.form = { Map: class {
 }};
 window.fake = {
     release: { tag: 'v-test', url: 'https://github.com/fw', sha256: 'a'.repeat(64), size: 1024, kernel_match: 1, current_kernel: '6.18.60', release_kernel: '6.18.60', same_base: 1 },
+    info: { current_tag: 'v1.0.0', current_rev: 'r38253-e2ed57b957' },
     status: { state: 'idle' }, boot: '1', calls: [], fail: '', slowCheck: false,
     modem: { present: true, enabled: '1', source: 'daemon', stamp_age: 5, check_interval: 30,
         sim: { phase: 'ready', configured_slot: 'auto', slot: 'esim' }, reg: {},
@@ -71,6 +72,7 @@ window.fs = { async exec(path, args = []) {
         data = fake.release;
     }
     if (command === 'status') data = fake.status;
+    if (command === 'info') data = fake.info;
     if (command === 'download') data = { started: true };
     if (command === 'preflight') data = { ready: 1 };
     if (command === 'flash') data = { started: true };
@@ -112,18 +114,17 @@ class UITests(unittest.TestCase):
         self.page.evaluate('source => mount(source)', source)
 
     def test_upgrade_renders_before_network_check_finishes(self):
-        self.page.evaluate("Object.assign(fake.release, {current_tag: 'v1.0.0', current_rev: 'r38253-e2ed57b957'})")
         self.page.evaluate('fake.slowCheck = true')
         self.mount('upgrade')
         self.assertTrue(self.page.get_by_role('heading', name='在线固件更新', exact=True).is_visible())
         self.assertTrue(self.page.get_by_role('button', name='下载固件到路由器').is_disabled())
-        self.page.evaluate('finishCheck()')
-        self.page.wait_for_function('!current.checking')
-        self.assertTrue(self.page.get_by_role('button', name='下载固件到路由器').is_enabled())
         installed = self.page.get_by_role('row').filter(has=self.page.get_by_role('rowheader', name='当前固件'))
         baseline = self.page.get_by_role('row').filter(has=self.page.get_by_role('rowheader', name='当前 OpenWrt 基线'))
         self.assertEqual(installed.get_by_role('cell').inner_text(), 'v1.0.0')
         self.assertIn('r38253-e2ed57b957', baseline.get_by_role('cell').inner_text())
+        self.page.evaluate('finishCheck()')
+        self.page.wait_for_function('!current.checking')
+        self.assertTrue(self.page.get_by_role('button', name='下载固件到路由器').is_enabled())
 
     def test_download_restore_progress_rpc_error_and_completion(self):
         self.page.evaluate("fake.status = {state: 'downloading', bytes: 512, total: 1024, tag: 'v-old'}")

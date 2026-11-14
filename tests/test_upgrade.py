@@ -225,14 +225,16 @@ fi
             name='NRadio Linux 6.18.60', published_at='2026-11-14T00:00:00Z', assets=[dict(
                 name='openwrt-nradio_c2000-ultra-squashfs-sysupgrade.bin', browser_download_url=self.url,
                 size=1024, digest='sha256:' + self.digest)])))
-        result = self.call('check', 'force')
-        self.assertEqual(result['kernel_match'], 1)
-        self.assertEqual(result['current_tag'], '')
+        self.assertEqual(self.call('check', 'force')['kernel_match'], 1)
+        self.assertEqual((self.root / 'api-calls').read_text(), 'call\n')
+
+    def test_installed_release_is_local(self):
+        self.assertEqual(self.call('info')['current_tag'], '')
         self.installed_release.write_text('v1.0.0\n')
-        result = self.call('check', 'force')
+        result = self.call('info')
         self.assertEqual(result['current_tag'], 'v1.0.0')
-        self.assertEqual(result['tag'], self.tag)
-        self.assertEqual((self.root / 'api-calls').read_text(), 'call\ncall\n')
+        self.assertEqual(result['current_rev'], 'r38246-24c13d794c')
+        self.assertFalse((self.root / 'api-calls').exists())
 
     def test_release_baseline_comparison(self):
         for tag, title, revision, same in (
