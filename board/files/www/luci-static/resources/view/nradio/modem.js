@@ -3,6 +3,7 @@
 'require form';
 'require poll';
 'require fs';
+'require ui';
 
 var slotNames = {
 	sim1: '外置 SIM1',
@@ -84,7 +85,7 @@ function renderSignalWidget(st) {
 
 return view.extend({
 	load: function() {
-		return fs.exec('/usr/sbin/mt5700-status');
+		return fs.exec('/usr/sbin/mt5700-status').catch(function(e) { return { error: e.message }; });
 	},
 
 	buildStatusTable: function() {
@@ -103,7 +104,7 @@ return view.extend({
 		for (var i = 0; i < rows.length; i++)
 			tbody.appendChild(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td left', 'width': '30%' }, rows[i][0]),
-				E('td', { 'class': 'td left', 'id': rows[i][1].id }, rows[i][1])
+				E('td', { 'class': 'td left' }, rows[i][1])
 			]));
 
 		return tbody;
@@ -124,12 +125,12 @@ return view.extend({
 		    switching = (st.sim.transition === 1 || noData || phase == 'switching'),
 		    absent = (phase == 'absent');
 
-		this.cModem.textContent = (!st.present)
+		this.cModem.textContent = (st.enabled === '0') ? '蜂窝功能已关闭（可在下方启用）' : (!st.present)
 			? '未检测到模组（USB 3466:3301 不在线）'
 			: 'MT5700M-CN 在线，USB %s Mbps，AT 口 %s，网卡 %s'.format(
 				st.usb_speed || '?', st.at_port || '—', st.netdev || '—');
 
-		if (!st.present) {
+		if (!st.present || st.enabled === '0') {
 			this.cSim.textContent = '—';
 			this.cIds.textContent = '—';
 			this.cReg.textContent = '—';
@@ -183,10 +184,10 @@ return view.extend({
 				this.cReg.textContent = reg.join(' ｜ ');
 			}
 
-			if (switching || stale || !st.signal.sysmode) {
+			if (switching || stale) {
 				this.cSig.replaceChildren(E('span', {}, '检测中…'));
 			}
-			else if (absent) {
+			else if (absent || !st.signal.sysmode) {
 				this.cSig.replaceChildren(E('span', {}, '无服务'));
 			}
 			else {
@@ -203,7 +204,7 @@ return view.extend({
 			}
 
 			var t = num(st.temp_dc);
-			this.cTemp.textContent = (t !== null) ? '%.1f °C'.format(t / 10) : '—';
+			this.cTemp.textContent = (!stale && !switching && t !== null) ? '%.1f °C'.format(t / 10) : '—';
 		}
 
 		var wwan = [];
@@ -233,14 +234,36 @@ return view.extend({
 			meta.push('AT 通道忙（拨号/守护进程操作中）');
 		if (stale)
 			meta.push('模组数据已过期（%d 秒前），等待守护进程刷新'.format(age));
-		meta.push('数据来源：%s（%d 秒前）'.format(
-			st.source === 'none' ? '无' : st.source, age || 0));
+		if (noData) meta.push('等待后台采集；页面每 10 秒自动刷新');
+		else meta.push('后台快照：%d 秒前；页面每 10 秒自动刷新'.format(Math.max(0, age || 0)));
 		this.cMeta.textContent = meta.join('；');
 	},
 
+	applyStatus: function(res) {
+		try {
+			if (res.error || res.code !== 0) throw new Error(res.error || res.stderr || '状态查询失败');
+			var st = JSON.parse(res.stdout);
+			if (!st.sim || !st.signal || !st.reg || !st.wwan) throw new Error('状态数据不完整');
+			this.updateStatus(st);
+		}
+		catch (e) {
+			// Never leave a previous "connected" verdict after a failed poll.
+			[ this.cModem, this.cSim, this.cIds, this.cReg, this.cSig, this.cWwan, this.cTemp ].forEach(function(cell) {
+				cell.textContent = '—';
+			});
+			this.cMeta.textContent = '暂时无法读取状态，将自动重试：' + e.message;
+		}
+	},
+
+	refreshStatus: function() {
+		if (this.refreshing) return this.refreshing;
+		this.refreshing = fs.exec('/usr/sbin/mt5700-status').then(L.bind(this.applyStatus, this))
+			.catch(L.bind(function(e) { this.applyStatus({ error: e.message }); }, this))
+			.finally(L.bind(function() { this.refreshing = null; }, this));
+		return this.refreshing;
+	},
+
 	render: function(first) {
-		var st = null;
-		try { st = JSON.parse(first && first.stdout || '{}'); } catch (e) {}
 
 		/* status cells, filled by updateStatus() */
 		this.cModem = E('em', { 'id': 'mt5700_modem' }, '…');
@@ -257,30 +280,29 @@ return view.extend({
 			this.buildStatusTable()
 		]);
 
-		if (st)
-			this.updateStatus(st);
-
+		this.applyStatus(first);
+		container.appendChild(E('button', {
+			'class': 'cbi-button', 'click': ui.createHandlerFn(this, 'refreshStatus')
+		}, '刷新状态'));
 		poll.add(L.bind(function() {
-			return fs.exec('/usr/sbin/mt5700-status').then(L.bind(function(res) {
-				var s = null;
-				try { s = JSON.parse(res.stdout); } catch (e) {}
-				if (s)
-					this.updateStatus(s);
-			}, this));
+			if (document.hidden) return Promise.resolve();
+			return this.refreshStatus();
 		}, this), 10);
 
 		/* settings form applied by the mt5700 daemon on its next tick */
 		var m = new form.Map('mt5700', null,
-			'设置由 <code>mt5700</code> 守护进程应用：保存后最迟在下一个检查周期生效（默认 30 秒，见下方「检查间隔」）。切换 SIM 卡或修改 APN 会短暂中断蜂窝连接。');
+			'点击「保存并应用」后，后台将在下一个检查周期开始处理（默认 30 秒，检测或注册可能需要更长时间）。切换 SIM 卡或修改 APN 会短暂中断蜂窝连接，可在上方查看进度。');
 
 		var s = m.section(form.NamedSection, 'modem', 'mt5700', '蜂窝设置');
+		s.tab('general', '常用设置');
+		s.tab('advanced', '高级设置');
 
-		var o = s.option(form.Flag, 'enabled', '启用 5G 蜂窝',
+		var o = s.taboption('general', form.Flag, 'enabled', '启用 5G 蜂窝',
 			'关闭后将切断模组供电并停止自动拨号。');
 		o.rmempty = false;
 		o.default = '1';
 
-		var o = s.option(form.ListValue, 'sim_slot', 'SIM 卡槽',
+		var o = s.taboption('general', form.ListValue, 'sim_slot', 'SIM 卡槽',
 			'「自动检测」按 外置 SIM1 → 外置 SIM2 → 内置 eSIM 顺序探测可用 SIM 卡。');
 		o.value('auto', slotNames.auto);
 		o.value('sim1', slotNames.sim1);
@@ -288,29 +310,31 @@ return view.extend({
 		o.value('esim', slotNames.esim);
 		o.default = 'auto';
 
-		var o = s.option(form.Value, 'apn', 'APN',
+		var o = s.taboption('general', form.Value, 'apn', 'APN',
 			'留空则按 IMSI 自动识别运营商并配置（移动 cmnet / 联通 3gnet / 电信 ctnet / 广电 cbnet）。');
 		o.placeholder = '自动（按运营商识别）';
 		o.datatype = 'maxlength(64)';
+		o.validate = function(section, value) {
+			return !value || /^[a-zA-Z0-9.-]+$/.test(value) || 'APN 只能包含字母、数字、点和连字符';
+		};
 
-		var s2 = m.section(form.NamedSection, 'modem', 'mt5700', '高级设置');
 
-		var o = s2.option(form.Flag, 'usb3_retrain', 'USB 3.0 自动重训练',
+		var o = s.taboption('advanced', form.Flag, 'usb3_retrain', 'USB 3.0 自动重训练',
 			'模组以 USB 2.0（480 Mbps）枚举时自动热重启并重训练至 USB 3.0（5000 Mbps）。');
 		o.rmempty = false;
 		o.default = '1';
 
-		var o = s2.option(form.Flag, 'fix_nvram', '模组 NVRAM 自愈',
+		var o = s.taboption('advanced', form.Flag, 'fix_nvram', '模组 NVRAM 自愈',
 			'自动修复其他系统残留的异常配置（SETMODE / TDCFG 网卡模式、C5GOPTION 5G SA 锁死）。');
 		o.rmempty = false;
 		o.default = '1';
 
-		var o = s2.option(form.Flag, 'thermal_guard', '模组高温联动散热',
+		var o = s.taboption('advanced', form.Flag, 'thermal_guard', '模组高温联动散热',
 			'按 AT^CHIPTEMP 模组内部温度联动风扇加速（≥72 °C 起步），先于 97 °C 保护性断网。');
 		o.rmempty = false;
 		o.default = '1';
 
-		var o = s2.option(form.Value, 'check_interval', '检查间隔（秒）',
+		var o = s.taboption('advanced', form.Value, 'check_interval', '检查间隔（秒）',
 			'守护进程巡检 SIM / 注册 / 拨号状态的周期。');
 		o.placeholder = '30';
 		o.datatype = 'range(10, 600)';

@@ -2,297 +2,260 @@
 'require view';
 'require fs';
 'require ui';
-
-var REPO = 'veildawn/nradio-c2000-ultra';
+'require poll';
 
 function num(v) {
 	var n = parseInt(v, 10);
-	return isNaN(n) ? null : n;
+	return isNaN(n) ? 0 : n;
 }
 
 function fmtDate(v) {
-	var d = new Date(num(v) * 1000);
-	return isNaN(d.getTime()) ? String(v || '—') : '%d-%02d-%02d %02d:%02d'.format(
-		d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes());
+	if (!num(v)) return '—';
+	return new Date(num(v) * 1000).toLocaleString();
 }
 
-function fmtSize(b) {
-	var n = num(b);
-	if (n === null || n <= 0) return '—';
-	return (n >= 1048576) ? '%.1f MB'.format(n / 1048576) : '%d KB'.format(Math.max(1, n / 1024));
+function fmtSize(v) {
+	var n = num(v);
+	return n >= 1048576 ? '%.1f MB'.format(n / 1048576) : '%d KB'.format(Math.ceil(n / 1024));
 }
 
 function exec(args) {
 	return fs.exec('/usr/sbin/c2000-upgrade', args).then(function(res) {
-		try {
-			return JSON.parse(res.stdout);
-		}
-		catch (e) {
-			throw new Error('解析升级助手输出失败：%s'.format((res.stderr || res.stdout || e.message).trim()));
-		}
+		var st;
+		try { st = JSON.parse(res.stdout); }
+		catch (e) { throw new Error('升级助手返回异常，请重试。' + (res.stderr || '')); }
+		if (st.error || res.code !== 0)
+			throw new Error(st.error || st.msg || '升级操作失败');
+		return st;
 	});
 }
 
 return view.extend({
+	handleSave: null,
+	handleSaveApply: null,
+	handleReset: null,
+
 	load: function() {
-		return Promise.all([
-			exec([ 'check' ]),
-			exec([ 'status' ])
-		]).then(function(rs) {
-			return { check: rs[0], dl: rs[1] };
-		});
+		// Render local state first, even if GitHub is unreachable.
+		return exec([ 'status' ]).catch(function(e) { return { state: 'unknown', msg: e.message }; });
 	},
 
-	checkBox: E('div', { 'style': 'margin:1em 0;' }),
-	dlBox: E('div', { 'style': 'margin:1em 0;display:none;' }),
-	flashBox: E('div', { 'style': 'margin:1em 0;display:none;' }),
+	isActive: function() {
+		return this.download && [ 'downloading', 'verifying', 'flashing' ].indexOf(this.download.state) >= 0;
+	},
+
+	updateActions: function() {
+		var active = this.isActive(), locked = active || this.busy || this.checking;
+		this.checkButton.disabled = !!locked;
+		this.downloadButton.disabled = !!(locked || !this.latest || this.latest.kernel_match !== 1);
+		this.mirrorInput.disabled = !!locked;
+		this.flashBox.querySelectorAll('button').forEach(function(button) { button.disabled = !!locked; });
+	},
 
 	renderCheck: function(st) {
-		var nodes = [];
-		var cur = '%s（构建于 %s）'.format(st.current_rev || '?', fmtDate(st.current_date));
-
-		nodes.push(E('tr', { 'class': 'tr' }, [
-			E('td', { 'class': 'td left', 'width': '30%' }, '当前固件'),
-			E('td', { 'class': 'td left' }, cur)
-		]));
-
-		if (st.error) {
-			nodes.push(E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, '检查结果'),
-				E('td', { 'class': 'td left' }, [ E('div', { 'class': 'alert-message warning' }, st.error) ])
-			]));
-		}
-		else {
-			var badge = (st.same_base == 1)
-				? E('span', { 'class': 'label', 'style': 'background:#2eb872;color:#fff;padding:2px 8px;border-radius:3px;' }, '同源码版本')
-				: (st.same_base == -1)
-					? E('span', { 'class': 'label', 'style': 'background:#999;color:#fff;padding:2px 8px;border-radius:3px;' }, '版本无法比较')
-					: E('span', { 'class': 'label', 'style': 'background:#f0ad4e;color:#fff;padding:2px 8px;border-radius:3px;' }, '有新构建');
-				nodes.push(E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, '最新 Release'),
-				E('td', { 'class': 'td left' }, [
-					E('b', {}, st.tag || '—'), ' ', badge, E('div', {
-						'style': 'font-size:small;color:#666;'
-					}, '发布：%s ｜ 固件：%s ｜ 基于 %s%s'.format(
-						(st.published || '—').replace('T', ' ').replace(/Z$/, ' UTC'),
-						fmtSize(st.size), st.rev || '—',
-						st.sha256 ? ' ｜ SHA-256：' + st.sha256.slice(0, 12) + '…' : ''))
-				])
-			]));
-			if (st.kernel_match === 0) {
-				nodes.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, '内核版本'),
-					E('td', { 'class': 'td left' }, [
-						E('div', { 'class': 'alert-message danger' },
-							'Release 内核 %s 与当前 %s 不一致：在线升级只覆写 rootfs（内核分区为原厂 boot 镜像格式），跨内核升级必须通过原厂 Web 界面刷入完整固件。'.format(st.release_kernel || '?', st.current_kernel || '?'))
-					])
-				]));
-			}
-			this.latest = st;
-		}
-
-		this.checkBox.replaceChildren(E('table', { 'class': 'table' }, nodes));
-
-		var actions = [];
-		if (!st.error && st.url && st.kernel_match === 0) {
-			actions.push(E('div', { 'style': 'margin-bottom:.6em;' }, [
-				E('span', { 'style': 'color:#999;' }, '跨内核版本，在线升级已禁用（见上方说明）。')
-			]));
-		}
-		if (!st.error && st.url && st.kernel_match !== 0) {
-			this.mirrorInput = E('input', {
-				'type': 'text',
-				'class': 'cbi-input-text',
-				'placeholder': '下载加速前缀（可选，如 https://ghfast.top/）',
-				'style': 'width:280px;margin-right:.5em;'
-			});
-			actions.push(E('div', { 'style': 'margin-bottom:.6em;font-size:small;color:#666;' }, [
-				'github.com 直连不通时填写加速前缀（固件完整性始终以 GitHub API 提供的 SHA-256 摘要校验，与下载途径无关）：',
-				E('br'),
-				this.mirrorInput
-			]));
-		}
-		actions.push(E('div', {}, [
-			E('button', {
-				'class': 'cbi-button cbi-button-neutral important',
-				'click': ui.createHandlerFn(this, 'handleCheck')
-			}, '重新检查'),
-			' ',
-			(!st.error && st.url) ? E('button', {
-				'class': 'cbi-button cbi-button-positive important',
-				'click': ui.createHandlerFn(this, 'handleDownload')
-			}, '下载固件到路由器') : E('span', { 'style': 'color:#999;' }, '（无可用固件资产）')
-		]));
-		this.checkBox.appendChild(E('div', { 'style': 'margin-top:1em;' }, actions));
+		this.latest = st;
+		var rows = [
+			[ '当前固件', '%s（构建于 %s）'.format(st.current_rev || '—', fmtDate(st.current_date)) ],
+			[ '最新发布', st.tag || '—' ],
+			[ '发布时间', (st.published || '—').replace('T', ' ').replace(/Z$/, ' UTC') ],
+			[ '固件大小', fmtSize(st.size) ],
+			[ '内核版本', '%s → %s'.format(st.current_kernel || '未知', st.release_kernel || '未知') ]
+		];
+		this.checkBox.replaceChildren(E('table', { 'class': 'table' }, rows.map(function(row) {
+			return E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left', 'width': '30%' }, row[0]),
+				E('td', { 'class': 'td left' }, row[1])
+			]);
+		})));
+		if (st.kernel_match !== 1)
+			this.checkBox.appendChild(E('div', { 'class': 'alert-message warning' },
+				st.kernel_match === 0
+					? '此版本的内核与当前系统不同，请通过原厂 Web 界面刷入完整固件。在线升级已禁用。'
+					: '无法确认此版本的内核兼容性，在线升级已禁用。请检查 Release 信息。'));
+		else if (st.same_base === 1)
+			this.checkBox.appendChild(E('p', {}, '此版本与当前固件使用相同的 OpenWrt 源码基线，仍可能包含新的板级功能和修复。'));
 	},
 
-	handleCheck: function() {
-		var btns = this.checkBox.querySelectorAll('button');
-		for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
-		this.checkBox.appendChild(E('div', { 'style': 'margin-top:.6em;color:#666;' }, '正在查询 GitHub…'));
-		return exec([ 'check' ]).then(L.bind(function(st) {
+	handleCheck: function(force) {
+		if (this.checking || this.isActive()) return Promise.resolve();
+		this.checking = true;
+		this.notice.textContent = '正在检查最新版本…';
+		this.updateActions();
+		return exec(force === true ? [ 'check', 'force' ] : [ 'check' ]).then(L.bind(function(st) {
 			this.renderCheck(st);
+			this.notice.textContent = '检查完成。';
+		}, this)).catch(L.bind(function(e) {
+			this.latest = null;
+			this.notice.textContent = e.message + '。可点击「重新检查」重试。';
+		}, this)).finally(L.bind(function() {
+			this.checking = false;
+			this.updateActions();
 		}, this));
 	},
 
 	handleDownload: function() {
-		var st = this.latest;
-		if (!st || !st.url) return;
-		var mirror = this.mirrorInput ? (this.mirrorInput.value || '').trim() : '';
-		this.dlBox.style.display = '';
-		this.bar = this.bar || E('div', { 'style': 'background:rgba(128,128,128,.2);border-radius:4px;height:16px;overflow:hidden;margin:.5em 0;' });
-		this.barFill = this.barFill || E('div', { 'style': 'height:100%;width:0;background:#2eb872;transition:width .5s;' });
-		this.bar.replaceChildren(this.barFill);
-		this.dlBox.replaceChildren(E('h4', {}, '正在下载固件…'), this.bar);
-		return exec([ 'download', st.url, st.sha256 || '', mirror, st.tag || '' ]).then(L.bind(function() {
-			this.pollDownload(0);
-		}, this));
-	},
-
-	pollDownload: function(retry) {
-		return exec([ 'status' ]).then(L.bind(function(st) {
-			if (st.state == 'downloading') {
-				var pct = (this.latest && num(this.latest.size) > 0)
-					? Math.min(100, Math.round(100 * num(st.bytes) / num(this.latest.size))) : null;
-				if (this.barFill) {
-					if (pct !== null) this.barFill.style.width = '%d%%'.format(pct);
-					else this.barFill.style.width = '100%';
-				}
-				if (this.dlLabel) this.dlLabel.remove();
-				this.dlLabel = E('div', { 'style': 'font-size:small;color:#666;' },
-					'已下载 %s%s'.format(fmtSize(st.bytes), (pct !== null) ? '（%d%%）'.format(pct) : ''));
-				this.dlBox.appendChild(this.dlLabel);
-				window.setTimeout(L.bind(function() { this.pollDownload(0); }, this), 2000);
-			}
-			else if (st.state == 'done' && st.have_image) {
-				this.dlBox.replaceChildren(
-					E('h4', {}, '下载完成'),
-					E('div', { 'class': 'alert-message success' },
-						'SHA-256 校验通过：%s'.format((st.sha256 || '').slice(0, 16) + '…'))
-				);
-				this.renderFlash(st.tag);
-			}
-			else if (st.state == 'error') {
-				this.dlBox.replaceChildren(
-					E('h4', {}, '下载失败'),
-					E('div', { 'class': 'alert-message danger' }, st.msg || '未知错误')
-				);
-			}
-			else if (retry < 3) {
-				window.setTimeout(L.bind(function() { this.pollDownload(retry + 1); }, this), 1500);
-			}
-		}, this));
-	},
-
-	renderFlash: function(dlTag) {
-		this.flashBox.style.display = '';
-		/* Bind the staged image to the release it came from: a leftover
-		 * image from an older release must not be flashed while the page
-		 * advertises the metadata of a newer one. */
-		var stale = (this.latest && dlTag && this.latest.tag && dlTag != this.latest.tag);
-		if (stale) {
-			this.flashBox.replaceChildren(
-				E('h4', {}, '已下载固件版本不匹配'),
-				E('div', { 'class': 'alert-message warning' },
-					'/tmp 中的固件来自旧 Release「%s」，而当前最新为「%s」。请点击上方「下载固件到路由器」重新获取。'.format(dlTag, this.latest.tag))
-			);
+		if (this.busy || this.isActive() || !this.latest || this.latest.kernel_match !== 1) return;
+		var mirror = this.mirrorInput.value.trim();
+		if (mirror && !/^https:\/\/[^\s/]+(?:\/[^\s]*)?$/.test(mirror)) {
+			this.notice.textContent = '请输入以 https:// 开头的有效下载加速前缀。';
 			return;
 		}
-		this.flashBox.replaceChildren(
-			E('h4', {}, '选择升级方式'),
-			E('div', { 'style': 'display:flex;gap:.5em;flex-wrap:wrap;' }, [
-				E('button', {
-					'class': 'cbi-button cbi-button-apply important',
-					'click': ui.createHandlerFn(this, 'handleFlash', false)
-				}, '保留配置升级'),
-				E('button', {
-					'class': 'cbi-button cbi-button-negative important',
-					'click': ui.createHandlerFn(this, 'handleFlash', true)
-				}, '不保留配置升级（推荐）')
-			]),
-			E('p', { 'style': 'font-size:small;color:#666;max-width:640px;' },
-				'说明：从原厂 / Mwrt / 早期版本迁移时，旧 /etc/config 残留会破坏 SSH、Wi-Fi 与 5G 拨号（本仓库实测），' +
-				'因此跨系统升级建议选择「不保留配置」；从本固件在线更新到新构建时，保留配置一般安全。')
-		);
-	},
-
-	handleFlash: function(nok) {
-		var args = [ 'preflight' ];
-		return exec(args).then(L.bind(function(pf) {
-			if (pf.ready != 1) {
-				ui.showModal('无法升级', [
-					E('p', {}, pf.msg || '固件未就绪'),
-					E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
-				]);
-				return;
-			}
-
-			var body, confirmTxt;
-			if (nok) {
-				confirmTxt = '清除配置并升级';
-				body = [
-					E('p', {}, [ E('b', {}, '将清除全部配置并刷入新固件：'), '相当于 sysupgrade -n。' ]),
-					E('ul', {}, [
-						E('li', {}, '所有设置（Wi-Fi、SIM、防火墙等）恢复默认，需重新配置；'),
-						E('li', {}, 'TF 卡上的系统与 LuCI 数据一并重置；'),
-						E('li', {}, '升级期间切勿断电，约 2–3 分钟后自动重启。')
-					])
-				];
-			}
-			else {
-				confirmTxt = '保留配置升级';
-				body = [
-					E('p', {}, [ E('b', {}, '保留现有配置刷入新固件：'), '相当于 sysupgrade（不带 -n）。' ]),
-					E('ul', {}, [
-						E('li', {}, 'Wi-Fi、SIM、APN、防火墙等配置全部保留；'),
-						E('li', {}, '若从原厂 / Mwrt 或很旧的版本升级，残留配置可能导致 SSH / Wi-Fi / 拨号异常（此时可再刷一次并选择不保留）；'),
-						E('li', {}, '升级期间切勿断电，约 2–3 分钟后自动重启。')
-					])
-				];
-			}
-			body.push(E('div', { 'class': 'right' }, [
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, '取消'), ' ',
-				E('button', {
-					'class': 'btn cbi-button %s'.format(nok ? 'cbi-button-negative' : 'cbi-button-apply'),
-					'click': ui.createHandlerFn(this, 'doFlash', nok)
-				}, confirmTxt)
-			]));
-			ui.showModal(nok ? '不保留配置升级' : '保留配置升级', body);
+		this.busy = true;
+		this.updateActions();
+		this.notice.textContent = '正在启动下载…';
+		return exec([ 'download', this.latest.url, this.latest.sha256, mirror, this.latest.tag ]).then(L.bind(function() {
+			this.notice.textContent = '下载在路由器后台进行，关闭或刷新页面后可继续查看。';
+			this.renderDownload({ state: 'downloading', bytes: 0, total: this.latest.size, tag: this.latest.tag });
+			return this.refreshDownload();
+		}, this)).catch(L.bind(function(e) {
+			this.notice.textContent = e.message;
+		}, this)).finally(L.bind(function() {
+			this.busy = false;
+			this.updateActions();
 		}, this));
 	},
 
-	doFlash: function(nok) {
-		var path = '/tmp/c2000-upgrade-sysupgrade.bin',
-		    args = nok ? [ '-n', path ] : [ path ];
-		ui.showModal('正在升级…', [
-			E('p', {}, '正在写入固件并重启（约 2–3 分钟），请勿断电。'),
-			E('p', { 'style': 'color:#666;font-size:small;' },
-				'重启后请刷新本页。若长时间未恢复，可通过 SSH 或原厂双系统界面检查。')
-		]);
-		/* sysupgrade never returns; fire and forget */
-		fs.exec('/sbin/sysupgrade', args).catch(function() {});
-		window.setTimeout(function() { window.location.reload(true); }, 180000);
+	refreshDownload: function() {
+		if (this.statusPending) return Promise.resolve();
+		this.statusPending = true;
+		return exec([ 'status' ]).then(L.bind(function(st) {
+			this.renderDownload(st);
+		}, this)).catch(L.bind(function(e) {
+			this.dlNote.textContent = '暂时无法读取进度，将自动重试：' + e.message;
+		}, this)).finally(L.bind(function() { this.statusPending = false; }, this));
 	},
 
-	render: function(data) {
-		this.latest = null;
-		this.renderCheck(data.check);
-		if (data.dl && data.dl.state == 'done' && data.dl.have_image) {
-			this.dlBox.style.display = '';
-			this.dlBox.replaceChildren(
-				E('h4', {}, '固件已就绪'),
-				E('div', { 'class': 'alert-message success' },
-					'SHA-256 校验通过：%s…（/tmp 已有下载好的固件）'.format((data.dl.sha256 || '').slice(0, 16)))
-			);
-			this.renderFlash(data.dl.tag);
+	renderDownload: function(st) {
+		var previous = this.download;
+		this.download = st;
+		// Preserve keyboard focus on ready-image actions during idle polling.
+		if (st.state === 'done' && previous && previous.state === 'done' &&
+		    st.tag === previous.tag && st.sha256 === previous.sha256 && st.have_image === previous.have_image) {
+			this.updateActions();
+			return;
 		}
+		this.flashBox.replaceChildren();
+		this.dlBox.style.display = st.state === 'idle' ? 'none' : '';
+		this.bar.style.display = st.state === 'downloading' || st.state === 'verifying' ? '' : 'none';
+		if (st.state === 'downloading' || st.state === 'verifying') {
+			var total = num(st.total), bytes = num(st.bytes),
+			    pct = total > 0 ? Math.min(100, Math.floor(bytes / total * 100)) : null;
+			this.dlTitle.textContent = st.state === 'verifying' ? '下载完成，正在校验固件…' : '正在下载 ' + (st.tag || '固件');
+			this.barFill.style.width = pct === null ? '0%' : pct + '%';
+			if (pct !== null) this.bar.setAttribute('aria-valuenow', pct);
+			else this.bar.removeAttribute('aria-valuenow');
+			this.dlNote.textContent = '已下载 %s%s'.format(fmtSize(bytes), total ? ' / %s（%d%%）'.format(fmtSize(total), pct) : '');
+		}
+		else if (st.state === 'done' && st.have_image) {
+			this.dlTitle.textContent = '固件已就绪：' + (st.tag || '未知版本');
+			this.dlNote.textContent = 'SHA-256 校验通过，可选择升级方式。';
+			this.renderFlash(st);
+		}
+		else if (st.state === 'flashing') {
+			this.dlTitle.textContent = '正在升级';
+			this.dlNote.textContent = '正在写入固件并重启，请勿断电。';
+		}
+		else if (st.state !== 'idle') {
+			this.dlTitle.textContent = '固件未就绪';
+			this.dlNote.textContent = st.msg || '文件已丢失，请重新下载。';
+		}
+		this.updateActions();
+		if (st.state === 'error' && this.flashing) {
+			this.flashing = false;
+			ui.hideModal();
+			ui.addNotification(null, E('p', {}, st.msg), 'error');
+		}
+	},
+
+	renderFlash: function(st) {
+		this.flashBox.appendChild(E('p', {}, '本固件日常更新可保留配置；从原厂或 Mwrt 迁移时建议清除配置。'));
+		this.flashBox.appendChild(E('div', { 'style': 'display:flex;gap:.5em;flex-wrap:wrap;' }, [
+			E('button', { 'class': 'cbi-button cbi-button-apply', 'click': L.bind(this.handleFlash, this, false, st.sha256) }, '保留配置升级'),
+			E('button', { 'class': 'cbi-button cbi-button-negative', 'click': L.bind(this.handleFlash, this, true, st.sha256) }, '清除配置升级')
+		]));
+	},
+
+	handleFlash: function(reset, digest) {
+		if (this.busy || this.isActive()) return;
+		this.busy = true;
+		this.updateActions();
+		this.notice.textContent = '正在检查固件完整性与设备兼容性…';
+		return exec([ 'preflight', digest ]).then(L.bind(function() {
+			this.notice.textContent = '';
+			ui.showModal(reset ? '清除配置并升级' : '保留配置升级', [
+				E('p', {}, '将安装固件：' + this.download.tag),
+				E('p', {}, reset
+					? 'Wi-Fi、SIM、APN、防火墙和管理密码等设置将恢复默认。重启后请用网线连接 LAN 口，访问 192.168.1.1 重新设置。'
+					: '保留现有配置，额外安装的软件包需重新安装。升级后管理地址保持不变。'),
+				E('p', {}, '升级约需 2–3 分钟，期间请勿断电。'),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'btn', 'click': ui.hideModal }, '取消'), ' ',
+					E('button', { 'class': 'btn cbi-button-negative', 'click': L.bind(this.doFlash, this, reset, digest) }, '确认升级')
+				])
+			]);
+		}, this)).catch(L.bind(function(e) { this.notice.textContent = e.message; }, this)).finally(L.bind(function() {
+			this.busy = false;
+			this.updateActions();
+		}, this));
+	},
+
+	doFlash: function(reset, digest) {
+		if (this.busy || this.isActive()) return;
+		this.busy = true;
+		this.updateActions();
+		return exec([ 'flash', reset ? 'reset' : 'keep', digest ]).then(L.bind(function() {
+			this.flashing = true;
+			this.renderDownload({ state: 'flashing' });
+			ui.showModal('正在升级…', [
+				E('p', { 'class': 'spinning' }, '正在写入固件并重启，约需 2–3 分钟，请勿断电。'),
+				E('p', {}, reset ? '重启后请用网线连接 LAN 口，访问 http://192.168.1.1。' : '重启后请重新打开当前管理地址。')
+			]);
+			window.setTimeout(L.bind(function() {
+				if (this.flashing) ui.awaitReconnect(reset ? '192.168.1.1' : window.location.host);
+			}, this), 10000);
+		}, this)).catch(function(e) {
+			ui.hideModal();
+			ui.addNotification(null, E('p', {}, e.message), 'error');
+		}).finally(L.bind(function() { this.busy = false; this.updateActions(); }, this));
+	},
+
+	render: function(st) {
+		this.latest = null;
+		this.busy = false;
+		this.checking = false;
+		this.statusPending = false;
+		this.checkBox = E('div');
+		this.notice = E('p', { 'role': 'status', 'aria-live': 'polite' });
+		this.mirrorInput = E('input', { 'class': 'cbi-input-text', 'type': 'url',
+			'placeholder': 'https://…/', 'style': 'width:100%;max-width:32em;', 'aria-label': '下载加速前缀（可选）' });
+		// This view owns the disabled state for the entire background task;
+		// ui.createHandlerFn would re-enable its button after the start RPC.
+		this.checkButton = E('button', { 'class': 'cbi-button', 'click': L.bind(this.handleCheck, this, true) }, '重新检查');
+		this.downloadButton = E('button', { 'class': 'cbi-button cbi-button-positive', 'click': L.bind(this.handleDownload, this) }, '下载固件到路由器');
+		this.dlTitle = E('h4');
+		this.dlNote = E('p', { 'role': 'status' });
+		this.barFill = E('div', { 'style': 'height:100%;width:0;background:#2eb872;transition:width .5s;' });
+		this.bar = E('div', { 'role': 'progressbar', 'aria-label': '固件下载进度', 'aria-valuemin': '0', 'aria-valuemax': '100',
+			'style': 'background:rgba(128,128,128,.2);height:16px;border-radius:4px;overflow:hidden;' }, this.barFill);
+		this.dlBox = E('div', {}, [ this.dlTitle, this.bar, this.dlNote ]);
+		this.flashBox = E('div');
+		this.renderDownload(st);
+		poll.add(L.bind(function() {
+			if (document.hidden || this.busy) return Promise.resolve();
+			// Active tasks update every 2s. Idle tabs still notice other sessions.
+			this.idleTicks = (this.idleTicks || 0) + 1;
+			if (!this.isActive() && this.download.state !== 'unknown' && this.idleTicks % 5 !== 0) return Promise.resolve();
+			return this.refreshDownload();
+		}, this), 2);
+		this.handleCheck(false);
 		return E('div', {}, [
 			E('h2', {}, '在线固件更新'),
-			E('p', {},
-				'检查并升级到 GitHub 仓库 %s 的最新 Release（官方 OpenWrt Snapshot 基线构建）。'.format(REPO)),
+			E('p', {}, '检查 veildawn/nradio-c2000-ultra 的最新固件。下载与校验在路由器后台进行。'),
 			this.checkBox,
-			this.dlBox,
-			this.flashBox
+			E('p', {}, [ '下载加速前缀（可选）', E('br'), this.mirrorInput ]),
+			E('p', {}, '直连 GitHub 下载失败时可填写 HTTPS 加速前缀，固件仍按 GitHub 提供的 SHA-256 校验。'),
+			E('div', { 'style': 'display:flex;gap:.5em;flex-wrap:wrap;' }, [ this.checkButton, this.downloadButton ]),
+			this.notice, this.dlBox, this.flashBox
 		]);
 	}
 });
