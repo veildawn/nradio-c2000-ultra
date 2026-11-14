@@ -613,30 +613,70 @@ record_traffic() {
 	day=$(date +%Y-%m-%d)
 	mon=$(traffic_period_key)
 
-	if [ -f "$TRAFFIC_DB" ]; then
-		eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$TRAFFIC_DB")"
+	# volatile working copy; checkpoints to NOR at most every 10 minutes
+	# (or after 1 MiB of new traffic) to spare the rootfs_data overlay
+	local vdb=/tmp/mt5700.traffic.db
+	[ -f "$vdb" ] || cp "$TRAFFIC_DB" "$vdb" 2>/dev/null
+	if [ -f "$vdb" ]; then
+		eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$vdb")"
 	fi
 	day_rx=${day_rx:-0}; day_tx=${day_tx:-0}
 	mon_rx=${mon_rx:-0}; mon_tx=${mon_tx:-0}
 	tot_rx=${tot_rx:-0}; tot_tx=${tot_tx:-0}
-	last_rx=${last_rx:-0}; last_tx=${last_tx:-0}
 	old_day=${day_key:-$day}
 	old_mon=${mon_key:-$mon}
 
+	# first sighting (fresh db / cleared totals): adopt current counters as
+	# the baseline without crediting historic session bytes to any bucket
+	if [ -z "${last_rx:-}" ] || [ -z "${last_tx:-}" ]; then
+		last_rx=$rx; last_tx=$tx
+	fi
+
+	# calendar / billing-period rollovers zero their buckets regardless of
+	# whether the counters are monotonic across the boundary
+	[ "$old_day" != "$day" ] && { day_rx=0; day_tx=0; }
+	[ "$old_mon" != "$mon" ] && { mon_rx=0; mon_tx=0; }
+
 	# deltas vs last sample; counter reset / iface rebuild -> resync only
-	if [ "$rx" -ge "$last_rx" ] && [ "$tx" -ge "$last_tx" ]; then
+	if [ "$rx" -ge "${last_rx:-0}" ] && [ "$tx" -ge "${last_tx:-0}" ]; then
 		local drx=$((rx - last_rx)) dtx=$((tx - last_tx))
-		[ "$old_day" != "$day" ] && { day_rx=0; day_tx=0; }
-		[ "$old_mon" != "$mon" ] && { mon_rx=0; mon_tx=0; }
 		day_rx=$((day_rx + drx)); day_tx=$((day_tx + dtx))
 		mon_rx=$((mon_rx + drx)); mon_tx=$((mon_tx + dtx))
 		tot_rx=$((tot_rx + drx)); tot_tx=$((tot_tx + dtx))
-		[ $((drx + dtx)) -eq 0 ] && [ "$old_day" = "$day" ] && [ "$old_mon" = "$mon" ] && return 0
 	fi
+	last_rx=$rx; last_tx=$tx
 
-	mkdir -p /etc/mt5700
 	printf 'day_key=%s\nmon_key=%s\nday_rx=%d\nday_tx=%d\nmon_rx=%d\nmon_tx=%d\ntot_rx=%d\ntot_tx=%d\nlast_rx=%s\nlast_tx=%s\nupdated=%s\n' \
-		"$day" "$mon" "$day_rx" "$day_tx" "$mon_rx" "$mon_tx" "$tot_rx" "$tot_tx" "$rx" "$tx" "$now" > "$TRAFFIC_DB"
+		"$day" "$mon" "$day_rx" "$day_tx" "$mon_rx" "$mon_tx" "$tot_rx" "$tot_tx" "$rx" "$tx" "$now" > "$vdb"
+
+	# checkpoint policy: every 600s or after 1 MiB of new traffic
+	local ckpt_at="" ckpt_tot=0
+	if [ -f "$TRAFFIC_DB" ]; then
+		ckpt_at=$(sed -n 's/^updated=//p' "$TRAFFIC_DB" | tail -n 1)
+		ckpt_tot=$(( $(sed -n 's/^tot_rx=//p' "$TRAFFIC_DB" | tail -n 1) + $(sed -n 's/^tot_tx=//p' "$TRAFFIC_DB" | tail -n 1) ))
+	fi
+	if [ -z "$ckpt_at" ] || [ $((now - ckpt_at)) -ge 600 ] || [ $((tot_rx + tot_tx - ckpt_tot)) -ge 1048576 ]; then
+		mkdir -p /etc/mt5700
+		cp "$vdb" "$TRAFFIC_DB"
+	fi
+}
+
+# Per-connection session baseline: when wwan_4 uptime drops, the data
+# connection restarted -- rebase "session traffic" to the current one.
+record_session_baseline() {
+	local net="$MODEM_NET" up rx tx prev_up=999999999
+	[ -n "$net" ] || return 0
+	up=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e '@.uptime' 2>/dev/null)
+	[ -n "$up" ] || return 0
+	rx=$(cat "/sys/class/net/$net/statistics/rx_bytes" 2>/dev/null | tr -cd '0-9')
+	tx=$(cat "/sys/class/net/$net/statistics/tx_bytes" 2>/dev/null | tr -cd '0-9')
+	local f=/tmp/mt5700.session
+	[ -f "$f" ] && prev_up=$(sed -n 's/^uptime=//p' "$f")
+	if [ ! -f "$f" ] || [ "$up" -lt "$prev_up" ]; then
+		printf 'uptime=%s\nbase_rx=%s\nbase_tx=%s\n' "$up" "${rx:-0}" "${tx:-0}" > "$f"
+	else
+		sed -i "s/^uptime=.*/uptime=$up/" "$f"
+	fi
 }
 
 # Returns 0 when a configured monthly limit is exceeded (billing-period
@@ -688,7 +728,7 @@ apply_netmode() {
 	case "$want" in
 	nr) wantstr="08" ;;
 	lte) wantstr="03" ;;
-	*) return 0 ;;
+	*) wantstr="080302" ;;
 	esac
 	[ -c "$MODEM_AT" ] || return 0
 	cur=$(at_cmd "$MODEM_AT" "AT^SYSCFGEX?" | sed -n 's/.*SYSCFGEX:[[:space:]]*"\([0-9]*\)".*/\1/p' | head -n 1)
@@ -749,6 +789,7 @@ bringup_once() {
 
 	# Account traffic before anything below may reshuffle the netdev
 	record_traffic
+	record_session_baseline
 
 	# Monthly quota gate: 'offline' action tears the session down and stops
 	# dialing until the billing period rolls over or the limit is lifted

@@ -405,6 +405,15 @@ return view.extend({
 		if (switching || stale || absent) {
 			C.qci.textContent = '检测中…';
 			C.qcitable.replaceChildren();
+			C.ambrdl.textContent = '—';
+			C.ambrul.textContent = '—';
+			C.apnsub.textContent = '—';
+			C.pdp4.textContent = '—';
+			C.pdp6.textContent = '—';
+			C.cids.textContent = '—';
+			C.ndis.textContent = '—';
+			C.syscfg.textContent = '—';
+			C.nwtime.textContent = '—';
 		}
 		else {
 			var q = num(st.qos && st.qos.qci);
@@ -422,7 +431,9 @@ return view.extend({
 					['时延预算', info ? info[2] : '—'],
 					['丢包率', info ? info[3] : '—']
 				];
-				if (info && info[0] == 'non-GBR')
+				if (!info)
+					rows.push(['保证比特率', '未知（运营商专用 QCI/5QI，特性由运营商定义）']);
+				else if (info[0] == 'non-GBR')
 					rows.push(['保证比特率', '不保证（non-GBR，按网络 AMBR 调度）']);
 				else
 					rows.push(['保证比特率', 'GBR 承载（速率由网络分配）']);
@@ -461,7 +472,9 @@ return view.extend({
 		var C = this.cells, tr = st.traffic || {};
 
 		C.sess.textContent = '下行 %s ｜ 上行 %s ｜ 已连接 %s'.format(
-			fmtBytes(tr.live_rx), fmtBytes(tr.live_tx), fmtUptime(tr.uptime));
+			fmtBytes(tr.sess_rx !== undefined ? tr.sess_rx : tr.live_rx),
+			fmtBytes(tr.sess_tx !== undefined ? tr.sess_tx : tr.live_tx),
+			fmtUptime(tr.uptime));
 		C.day.textContent = '下行 %s ｜ 上行 %s ｜ 合计 %s'.format(
 			fmtBytes(tr.day_rx), fmtBytes(tr.day_tx), fmtBytes(num(tr.day_rx) + num(tr.day_tx)));
 		C.mon.textContent = '下行 %s ｜ 上行 %s ｜ 合计 %s'.format(

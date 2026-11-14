@@ -82,7 +82,9 @@ if [ -n "$MODEM_AT" ] && { [ -z "$RAW" ] || [ "$AGE" -gt "$STALE_AFTER" ]; }; th
 		# gcom occasionally segfaults on exit after printing valid output,
 		# so validity is judged by content (*OK*) rather than exit status
 		out=$(CMD_ICCID='AT^ICCID?' CMD_HCSQ='AT^HCSQ?' CMD_SCICHG='AT^SCICHG?' CMD_CHIPTEMP='AT^CHIPTEMP?' \
-			timeout 30 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
+			CMD_MONSC='AT^MONSC' CMD_NDIS='AT^NDISSTATQRY?' CMD_CFG='AT^SYSCFGEX?' CMD_NWTIME='AT^NWTIME?' \
+			CMD_DSAMBR='AT^DSAMBR=1' \
+			timeout 40 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
 		case "$out" in
 		*OK*)
 			printf '%s\n' "$out" > "$RAW_STAMP"
@@ -103,7 +105,7 @@ fi
 # Note: TD Tech "^" responses carry a literal caret prefix ('\^HCSQ: ...').
 CFUN=$(printf '%s\n' "$RAW" | sed -n 's/^+CFUN: *\([0-9]*\).*/\1/p' | tail -n 1)
 CPIN=$(printf '%s\n' "$RAW" | sed -n 's/^+CPIN: *//p' | tail -n 1)
-IMSI=$(printf '%s\n' "$RAW" | grep -E '^[0-9]{15}$' | tail -n 1)
+IMSI=$(printf '%s\n' "$RAW" | grep -E '^[0-9]{15}$' | head -n 1)
 ICCID=$(printf '%s\n' "$RAW" | sed -n 's/^\^ICCID: *\([0-9A-Fa-f]*\).*/\1/p' | tail -n 1)
 COPS=$(printf '%s\n' "$RAW" | sed -n 's/^+COPS: *//p' | tail -n 1)
 CSQ=$(printf '%s\n' "$RAW" | sed -n 's/^+CSQ: *\([0-9]*\),*\([0-9]*\).*/\1 \2/p' | tail -n 1)
@@ -124,7 +126,7 @@ MONSC_RAT=$(printf '%s' "$MONSC" | cut -d, -f1)
 MONSC_FIELDS=$(printf '%s' "$MONSC" | cut -d, -f2-)
 
 # Negotiated EPS/5G QoS (AT+CGEQOSRDP): "<cid>,<QCI/5QI>[,...]"
-QCI=$(printf '%s\n' "$RAW" | sed -n 's/^+CGEQOSRDP: *[0-9]*,\([0-9]*\).*/\1/p' | tail -n 1)
+QCI=$(printf '%s\n' "$RAW" | sed -n 's/^+CGEQOSRDP: *1,\([0-9]*\).*/\1/p' | head -n 1)
 
 # Subscribed APN-AMBR (AT^DSAMBR=1): "<cid>,<Dl kbps>,<Ul kbps>[,"<apn>"[,<5qi>]]"
 DSAMBR_DL=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,\([0-9]*\),\([0-9]*\).*/\1/p' | tail -n 1)
@@ -416,9 +418,15 @@ T_LIVE_RX=""; T_LIVE_TX=""; T_UPTIME=""
 }
 T_UPTIME=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e '@.uptime' 2>/dev/null)
 [ -f "$TRAFFIC_DB" ] && eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$TRAFFIC_DB")"
+T_SESS_RX=$(( ${T_LIVE_RX:-0} - $(sed -n 's/^base_rx=//p' /tmp/mt5700.session 2>/dev/null | tr -cd '0-9') ))
+T_SESS_TX=$(( ${T_LIVE_TX:-0} - $(sed -n 's/^base_tx=//p' /tmp/mt5700.session 2>/dev/null | tr -cd '0-9') ))
+[ "$T_SESS_RX" -ge 0 ] 2>/dev/null || T_SESS_RX=0
+[ "$T_SESS_TX" -ge 0 ] 2>/dev/null || T_SESS_TX=0
 json_add_object "traffic"
 json_add_string "live_rx" "${T_LIVE_RX:-0}"
 json_add_string "live_tx" "${T_LIVE_TX:-0}"
+json_add_string "sess_rx" "$T_SESS_RX"
+json_add_string "sess_tx" "$T_SESS_TX"
 json_add_string "uptime" "${T_UPTIME:-0}"
 json_add_int "day_rx" "${day_rx:-0}"
 json_add_int "day_tx" "${day_tx:-0}"
