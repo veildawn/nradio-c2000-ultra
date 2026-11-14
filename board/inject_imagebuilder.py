@@ -431,7 +431,7 @@ def main() -> None:
     print("Build custom image with:")
     print(
         f'  make -C "{ib}" image PROFILE=nradio_c2000-ultra '
-        'PACKAGES="luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn" '
+        'PACKAGES="kmod-usb-net-cdc-ether luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn" '
         'FILES="files-c2000-ultra"'
     )
 

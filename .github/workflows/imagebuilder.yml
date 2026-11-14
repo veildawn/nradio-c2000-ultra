@@ -12,7 +12,7 @@ on:
       extra_packages:
         description: "Space-separated OpenWrt packages to preinstall"
         required: false
-        default: "luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn iw-full pciutils usbutils picocom"
+        default: "luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn iw-full pciutils usbutils picocom"
       publish_release:
         description: "Publish built sysupgrade.bin as a GitHub Release"
         type: boolean
@@ -61,7 +61,7 @@ jobs:
         run: |
           EXTRA_PKGS="${{ inputs.extra_packages }}"
           if [ -z "$EXTRA_PKGS" ]; then
-            EXTRA_PKGS="luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn iw-full pciutils usbutils picocom"
+            EXTRA_PKGS="luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn iw-full pciutils usbutils picocom"
           fi
           umask 022
           make -C /tmp/ib/extracted image \
@@ -83,6 +83,12 @@ jobs:
           with tarfile.open("/tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra-squashfs-sysupgrade.bin", "r") as tf:
               names = tf.getnames()
               assert any(n.endswith("/CONTROL") for n in names) and any(n.endswith("/kernel") for n in names) and any(n.endswith("/root") for n in names), names
+          with open("/tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra.manifest") as mf:
+              pkgs = {line.split(" - ", 1)[0] for line in mf if " - " in line}
+          if "luci-i18n-base-zh-cn" in pkgs:
+              for app in sorted(p for p in pkgs if p.startswith("luci-app-")):
+                  i18n = f"luci-i18n-{app.removeprefix('luci-app-')}-zh-cn"
+                  assert i18n in pkgs, f"Missing Chinese translation package {i18n} for {app}!"
           PY
           cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra* /tmp/ib/release/
           cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/profiles.json /tmp/ib/release/

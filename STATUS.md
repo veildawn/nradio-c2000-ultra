@@ -33,7 +33,7 @@ umask 022
 python3 board/inject_imagebuilder.py ib
 make -C ib image \
   PROFILE="nradio_c2000-ultra" \
-  PACKAGES="kmod-usb-net-cdc-ether luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn iw-full pciutils usbutils picocom" \
+  PACKAGES="kmod-usb-net-cdc-ether luci luci-ssl luci-proto-ncm luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn iw-full pciutils usbutils picocom" \
   FILES="files-c2000-ultra"
 ```
 
