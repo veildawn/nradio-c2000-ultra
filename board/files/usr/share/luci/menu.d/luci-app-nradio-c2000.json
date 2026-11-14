@@ -7,10 +7,11 @@
 			"path": "nradio/modem"
 		},
 		"depends": {
-			"acl": [ "luci-app-nradio-c2000" ]
+			"acl": [
+				"luci-app-nradio-c2000"
+			]
 		}
 	},
-
 	"admin/system/bootswitch": {
 		"title": "双系统切换",
 		"order": 75,
@@ -19,10 +20,11 @@
 			"path": "nradio/bootswitch"
 		},
 		"depends": {
-			"acl": [ "luci-app-nradio-c2000" ]
+			"acl": [
+				"luci-app-nradio-c2000"
+			]
 		}
 	},
-
 	"admin/system/fwupdate": {
 		"title": "在线固件更新",
 		"order": 76,
@@ -31,7 +33,22 @@
 			"path": "nradio/upgrade"
 		},
 		"depends": {
-			"acl": [ "luci-app-nradio-c2000" ]
+			"acl": [
+				"luci-app-nradio-c2000"
+			]
+		}
+	},
+	"admin/network/apps": {
+		"title": "应用管控",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "nradio/apps"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-nradio-c2000"
+			]
 		}
 	}
 }
