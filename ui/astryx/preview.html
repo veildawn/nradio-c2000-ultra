@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-cn" data-theme="light" data-astryx-theme="neutral"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>NRadio App 预览</title><link rel="stylesheet" href="../../board/files/www/luci-static/astryx/astryx.css"></head>
+<body class="astryx-ui nr-authenticated"><div id="astryx-chrome" data-authenticated="1" data-preview="1" data-hostname="NRadio" data-model="C2000 Ultra" data-version="Snapshot" data-base="/cgi-bin/luci"></div><div id="indicators"></div><main id="maincontent" tabindex="-1"></main>
+<script>
+if(new URLSearchParams(location.search).has('login'))location.replace('preview-page.html?login=1');
+const groups=[{key:'status',title:'状态',pages:[['overview','总览'],['realtime','实时图表'],['syslog','系统日志']]},{key:'network',title:'网络',pages:[['network','网络接口'],['wireless','无线网络'],['cellular','5G 蜂窝'],['dhcp','DHCP / DNS'],['firewall','防火墙'],['routing','路由']]},{key:'system',title:'系统',pages:[['system','系统设置'],['admin','管理权'],['package_manager','软件包'],['flash','备份与升级'],['fwupdate','在线固件更新'],['bootswitch','双系统切换'],['reboot','重启']]},{key:'services',title:'服务',pages:[['plugin','示例插件']]}];
+const route=(key,page)=>'/ui/astryx/preview-page.html?route=admin/'+key+'/'+page;
+window.nradioMenu={menu:groups.map(g=>({key:'admin/'+g.key,title:g.title,url:route(g.key,g.pages[0][0]),active:false,children:g.pages.map(p=>({key:'admin/'+g.key+'/'+p[0],title:p[1],url:route(g.key,p[0]),active:false,children:[]}))})),title:'',breadcrumb:[]};
+window.nradioReadStatus=async()=>({board:{hostname:'NRadio',model:'C2000 Ultra'},info:{uptime:185340,memory:{total:1073741824,available:751619276},load:[9830,7864,6553]},interfaces:[{interface:'lan',up:true,'ipv4-address':[{address:'192.168.1.1',mask:24}]},{interface:'wan',up:true,'ipv4-address':[{address:'192.0.2.2',mask:24}]},{interface:'wwan',up:false}]});
+</script><script type="module" src="../../board/files/www/luci-static/astryx/astryx.js"></script></body></html>

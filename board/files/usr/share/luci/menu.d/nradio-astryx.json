@@ -1,0 +1,9 @@
+{
+  "admin/astryx": {
+    "title": "Management center",
+    "order": 1,
+    "hidden": true,
+    "firstchild_ineligible": true,
+    "action": {"type": "template", "path": "nradio/astryx"}
+  }
+}

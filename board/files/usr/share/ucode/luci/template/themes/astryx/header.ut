@@ -1,0 +1,93 @@
+{#
+ Copyright 2008 Steven Barth <steven@midlink.org>
+ Copyright 2012 David Menting <david@nut-bolt.nl>
+ Copyright 2008-2022 Jo-Philipp Wich <jo@mein.io>
+ Licensed to the public under the Apache License 2.0.
+-#}
+
+{%
+	import { getuid, getspnam } from 'luci.core';
+
+	const boardinfo = ubus.call('system', 'board') ?? {};
+	const astryx_host = ctx.path[1] == 'astryx';
+
+
+	http.prepare_content('text/html; charset=UTF-8');
+-%}
+
+<!DOCTYPE html>
+<html lang="{{ dispatcher.lang }}" data-astryx-theme="neutral">
+	<head>
+		<meta charset="utf-8">
+		<title>{{ striptags(`${boardinfo.hostname ?? '?'}${dispatched?.title ? ` | ${_(dispatched.title)}` : ''}`) }}</title>
+		<script>
+			(function() {
+				if (window.parent !== window) document.documentElement.classList.add('nr-embedded');
+				{% if (ctx.authsession && !astryx_host): %}
+				if (window.parent === window) {
+					var target = new URL({{ sprintf('%J', dispatcher.build_url('admin/astryx')) }}, location.href);
+					target.hash = new URLSearchParams({page: location.pathname + location.search + location.hash}).toString();
+					location.replace(target.href);
+				}
+				{% endif %}
+				var mode;
+				try { mode = localStorage.getItem('nradio-color-mode'); } catch (e) {}
+				if (mode !== 'light' && mode !== 'dark') mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+				document.documentElement.setAttribute('data-theme', mode);
+				document.documentElement.setAttribute('data-darkmode', String(mode === 'dark'));
+			})();
+		</script>
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+		<meta name="darkreader-lock">
+		<link rel="stylesheet" href="{{ media }}/astryx.css">
+		{% if (dispatched?.css): %}
+		<link rel="stylesheet" href="{{ resource }}/{{ dispatched.css }}">
+		{% endif %}
+		{% if (css): %}
+		<style title="text/css">{{ css }}</style>
+		{% endif %}
+		<script src="{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}"></script>
+		<script src="{{ resource }}/cbi.js"></script>
+	</head>
+
+	<body class="astryx-ui lang_{{ dispatcher.lang }} {{ ctx.authsession ? 'nr-authenticated' : 'nr-auth' }} {{ blank_page ? 'nr-blank' : '' }}" data-page="{{ entityencode(join('-', length(ctx.request_path) ? ctx.request_path : ctx.path), true) }}">
+		{% if (!blank_page): %}
+		<a class="nr-skip" href="#maincontent">{{ _('Skip to content') }}</a>
+		<div id="astryx-chrome" data-authenticated="{{ ctx.authsession ? '1' : '0' }}" data-hostname="{{ entityencode(boardinfo.hostname ?? 'OpenWrt', true) }}" data-model="{{ entityencode(boardinfo.model ?? 'C2000 Ultra', true) }}" data-version="{{ entityencode(version.distversion ?? 'OpenWrt', true) }}" data-home="{{ dispatcher.build_url('admin/astryx') }}" data-base="{{ dispatcher.build_url() }}"></div>
+		<div id="indicators"></div>
+		<main id="maincontent" tabindex="-1">
+			<nav class="nr-fallback-nav" aria-label="{{ _('Navigation') }}">
+			{% for (let item in [['admin/status/overview', 'Status'], ['admin/network/network', 'Network'], ['admin/system/system', 'System']]): %}
+				{% if (dispatcher.lookup(item[0])): %}<a href="{{ dispatcher.build_url(item[0]) }}">{{ _(item[1]) }}</a>{% endif %}
+			{% endfor %}
+			</nav>
+			{% if (getuid() == 0 && getspnam('root')?.pwdp === ''): %}
+				<div class="alert-message warning">
+					<h4>{{ _('No password set!') }}</h4>
+					<p>{{ _('There is no password set on this router. Please configure a root password to protect the web interface.') }}</p>
+					{% if (dispatcher.lookup("admin/system/admin")): %}
+					  <div class="right"><a class="btn" href="{{ dispatcher.build_url("admin/system/admin") }}">{{ _('Go to password configuration...') }}</a></div>
+					{% endif %}
+				</div>
+			{% endif %}
+
+			{% if (boardinfo.rootfs_type == "initramfs"): %}
+				<div class="alert-message warning">
+					<h4>{{ _('System running in recovery (initramfs) mode.') }}</h4>
+					<p>{{ _('No changes to settings will be stored and are lost after rebooting. This mode should only be used to install a firmware upgrade') }}</p>
+					{% if (dispatcher.lookup("admin/system/flash")): %}
+					  <div class="right"><a class="btn" href="{{ dispatcher.build_url("admin/system/flash") }}">{{ _('Go to firmware upgrade...') }}</a></div>
+					{% endif %}
+				</div>
+			{% endif %}
+
+			<noscript>
+				<div class="alert-message warning">
+					<h4>{{ _('JavaScript required!') }}</h4>
+					<p>{{ _('You must enable JavaScript in your browser or LuCI will not work properly.') }}</p>
+				</div>
+			</noscript>
+
+			<div id="tabmenu" style="display:none"></div>
+		{% endif %}
+
