@@ -49,30 +49,50 @@ return view.extend({
 		return (st.blocked || []).indexOf(id) >= 0;
 	},
 
+	/* colored circular icon badge with emoji */
+	renderIcon: function(info, small) {
+		var sz = small ? 24 : 36;
+		var fs = small ? 14 : 20;
+		return E('span', {
+			'style': 'display:inline-flex;align-items:center;justify-content:center;width:' + sz + 'px;height:' + sz + 'px;border-radius:50%;background:' + (info.color || '#888888') + ';font-size:' + fs + 'px;margin-right:' + (small ? 6 : 10) + 'px;flex-shrink:0;vertical-align:middle;'
+		}, info.icon || '🌐');
+	},
+
 	/* per-app usage row with a block toggle */
 	renderAppRow: function(st, stat) {
 		var self = this,
 		    info = this.findApp(st, stat ? stat.app : null),
 		    row = this.appRows[info.id];
 		if (!row) {
+			var qTd = E('td', { 'class': 'td left' }, '…'),
+			    tTd = E('td', { 'class': 'td left' }, '…'),
+			    btn = E('button', { 'class': 'cbi-button', 'style': 'padding:3px 12px;' }, '…');
 			row = E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, [ E('b', {}, info.name), E('div', { 'style': 'font-size:small;color:#888;' }, info.cat) ]),
-				E('td', { 'class': 'td left', 'id': 'nrapp_q_' + info.id }, '…'),
-				E('td', { 'class': 'td left', 'id': 'nrapp_t_' + info.id }, '…'),
-				E('td', { 'class': 'td left' },
-					E('button', { 'class': 'cbi-button', 'style': 'padding:3px 12px;', 'id': 'nrapp_b_' + info.id }, '…'))
+				E('td', { 'class': 'td left', 'style': 'min-width:180px;' }, [
+					this.renderIcon(info),
+					E('span', { 'style': 'display:inline-block;vertical-align:middle;' }, [
+						E('b', {}, info.name),
+						E('div', { 'style': 'font-size:small;color:#888;' }, info.cat)
+					])
+				]),
+				qTd,
+				tTd,
+				E('td', { 'class': 'td left' }, [ btn ])
 			]);
+			/* keep direct references: the row may not be in the document yet
+			 * when the table is assembled before being attached */
+			row._qTd = qTd;
+			row._tTd = tTd;
+			row._btn = btn;
 			this.appRows[info.id] = row;
 		}
-		document.getElementById('nrapp_q_' + info.id).textContent = stat ? '%d 次'.format(stat.queries) : '0';
-		document.getElementById('nrapp_t_' + info.id).textContent = stat ? fmtAgo(stat.last_ago) : '—';
-		var btn = document.getElementById('nrapp_b_' + info.id),
-		    blocked = this.isBlocked(st, info.id);
-		btn.textContent = blocked ? '解除阻断' : '阻断';
-		btn.className = 'cbi-button ' + (blocked ? 'cbi-button-negative' : '');
-		btn.style.padding = '3px 12px';
-		btn.disabled = !!stat === false && false;
-		btn.onclick = L.bind(self.toggleBlock, self, info.id, !blocked);
+		row._qTd.textContent = stat ? '%d 次'.format(stat.queries) : '0';
+		row._tTd.textContent = stat ? fmtAgo(stat.last_ago) : '—';
+		var blocked = this.isBlocked(st, info.id);
+		row._btn.textContent = blocked ? '解除阻断' : '阻断';
+		row._btn.className = 'cbi-button ' + (blocked ? 'cbi-button-negative' : '');
+		row._btn.style.padding = '3px 12px';
+		row._btn.onclick = L.bind(self.toggleBlock, self, info.id, !blocked);
 		return row;
 	},
 
@@ -200,13 +220,16 @@ return view.extend({
 				E('th', { 'class': 'th' }, '在用应用（DNS 请求 / 最近活跃）')
 			])
 		]);
-		(st.clients || []).forEach(function(c) {
-			var appChips = (c.apps || []).slice().sort(function(a, b) { return b.queries - a.queries; }).slice(0, 12).map(function(a) {
-				var info = self.findApp(st, a.app);
-				return E('span', {
-					'style': 'display:inline-block;margin:2px 4px 2px 0;padding:2px 8px;border-radius:10px;background:rgba(128,128,128,.15);font-size:small;'
-				}, '%s ×%d'.format(info.name, a.queries));
-			});
+			(st.clients || []).forEach(function(c) {
+				var appChips = (c.apps || []).slice().sort(function(a, b) { return b.queries - a.queries; }).slice(0, 12).map(function(a) {
+					var info = self.findApp(st, a.app);
+					return E('span', {
+						'style': 'display:inline-flex;align-items:center;margin:2px 4px 2px 0;padding:2px 10px 2px 4px;border-radius:12px;background:rgba(128,128,128,.12);font-size:small;'
+					}, [
+						self.renderIcon(info, true),
+						info.name + ' ×' + a.queries
+					]);
+				});
 			ct.appendChild(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td left' }, c.name || '（未知设备）'),
 				E('td', { 'class': 'td left' }, c.ip),

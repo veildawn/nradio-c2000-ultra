@@ -92,10 +92,14 @@ while :; do
 	[ -z "$id" ] && break
 	name=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].name" 2>/dev/null)
 	cat_=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].cat" 2>/dev/null)
+	icon_=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].icon" 2>/dev/null)
+	color_=$(jsonfilter -s "$(cat "$DOMAINS" 2>/dev/null)" -e "@.apps[$i].color" 2>/dev/null)
 	json_add_object ""
 	json_add_string "id" "$id"
 	json_add_string "name" "$name"
 	json_add_string "cat" "$cat_"
+	json_add_string "icon" "$icon_"
+	json_add_string "color" "$color_"
 	json_close_object
 	i=$((i + 1))
 done
