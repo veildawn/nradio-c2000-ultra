@@ -26,6 +26,9 @@
 | --- | --- | --- |
 | 网络 → **5G 蜂窝** | 模组/SIM 状态（三卡槽、IMSI/ICCID、运营商/注册）、`^HCSQ` 信号解码（NR/LTE/WCDMA/GSM 分制式 RSRP/SINR/RSRQ/EcIo + 信号条）、wwan IPv4/IPv6、模组温度；设置表单（SIM 卡槽 auto/sim1/sim2/esim、APN、USB3 重训练、NVRAM 自愈、高温联动、巡检间隔） | `modem.js` 10 秒轮询 `/usr/sbin/mt5700-status`（JSON）；设置写入 UCI `mt5700`，由守护进程下一周期（≤`check_interval`）应用 |
 | 系统 → **双系统切换** | 当前启动目标展示、一键切回原厂固件（确认弹窗 + 待重启警告 + 一键取消切回 + 可选立即重启） | `bootswitch.js` 经 rpcd ACL 受控执行 `c2000-bootswitch`，写入前自动校验 `u-boot-env` CRC32 |
+| 系统 → **在线固件更新** | 检查本仓库 GitHub Release（版本/摘要对比，同源码基线绿色徽章）、下载固件到 `/tmp`（进度条、断点重试、可选下载加速前缀）、SHA-256 校验、「保留配置升级」与「不保留配置升级（推荐）」双模式一键 sysupgrade | `c2000-upgrade`（check/download/status/preflight）：完整性锚点取自 `api.github.com` 资产 `digest` 字段（与下载途径解耦）；后台 `setsid` worker 下载规避 rpcd 超时；升级弹窗内置本机迁移风险提示（原厂/Mwrt 残留配置破坏 SSH/Wi-Fi/拨号的实测教训） |
+
+在线更新实测记录（2026-11-14，联通 5G 出口）：`api.github.com` 可达（含 IPv6 AAAA）；`github.com` release 下载域名全系 v4-only 且直连被墙——页面提供可选「下载加速前缀」（如 `https://ghfast.top/`，实测免费通道限速 ~10 KB/s 不可用，其他网络环境/有线 WAN 直连即可）；固件完整性始终以 API digest 校验（实测 ghfast 镜像内容哈希与 API digest 一致）。刷新页面自动恢复已下载就绪态。
 
 状态数据链路（注网被拒与 NR 双场景实机验证）：`mt5700-bringup` 每周期在持锁段开头执行一次只读 AT 批量采集（`/etc/gcom/mt5700-status.gcom`）写 `/tmp/mt5700.status.raw`；`mt5700-status` 优先读 stamp（零 AT 竞争），stamp 过期（>45s）且锁空闲时机会式直采。一致性语义参考原厂 ROM「按需实时查询」：切卡瞬间删除 stamp、`SLOT_STAMP` 晚于数据即判过渡态、CPIN 空且非过渡判「未检测到 SIM 卡」、stamp 超过 2×巡检间隔数值降级为「—」——UI 永不拿过期数据冒充当前状态。
 

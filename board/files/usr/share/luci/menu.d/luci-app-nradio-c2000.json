@@ -21,5 +21,17 @@
 		"depends": {
 			"acl": [ "luci-app-nradio-c2000" ]
 		}
+	},
+
+	"admin/system/fwupdate": {
+		"title": "在线固件更新",
+		"order": 76,
+		"action": {
+			"type": "view",
+			"path": "nradio/upgrade"
+		},
+		"depends": {
+			"acl": [ "luci-app-nradio-c2000" ]
+		}
 	}
 }

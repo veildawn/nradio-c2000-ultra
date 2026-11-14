@@ -1,0 +1,229 @@
+#!/bin/sh
+# NRadio C2000 Ultra online firmware updater for LuCI (luci-app-nradio-c2000).
+# Talks to the project GitHub releases, downloads & verifies the sysupgrade
+# image in the background (state file polled by the UI), and is also used as
+# the pre-flight check before handing the image to /sbin/sysupgrade.
+#
+# Commands:
+#   check           query latest release + compare with running firmware
+#   download URL SHA_URL   start background download+verify
+#   status          emit download progress/state as JSON
+#   preflight       verify downloaded image is ready to flash
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+REPO_API="https://api.github.com/repos/veildawn/nradio-c2000-ultra/releases/latest"
+STATE="/tmp/c2000-upgrade.state"
+BIN="/tmp/c2000-upgrade-sysupgrade.bin"
+PART="$BIN.part"
+
+cur_info() {
+	local b
+	b=$(ubus call system board 2>/dev/null)
+	json_load "$b"
+	json_select release
+	json_get_var CUR_REV revision
+	json_get_var CUR_DATE builddate
+	json_cleanup
+}
+
+state_set() {
+	# key=value lines, last write wins; callers rewrite the whole file
+	: > "$STATE"
+	while [ $# -gt 0 ]; do
+		printf '%s=%s\n' "$1" "$2"
+		shift 2
+	done >> "$STATE"
+}
+
+do_check() {
+	local raw tag pub url size sha_url tag_rev same
+	raw=$(timeout 25 uclient-fetch -q -O - "$REPO_API" 2>/dev/null)
+	case "$raw" in
+	*"tag_name"*) ;;
+	*)
+		json_init
+		json_add_string "error" "无法访问 GitHub API（api.github.com），请检查上行网络"
+		json_dump
+		return 1
+		;;
+	esac
+
+	json_load "$raw"
+	json_get_var tag tag_name
+	json_get_var pub published_at
+	url=""
+	size=""
+	sha=""
+	sha_url=""
+	local keys key an dg
+	if json_select assets 2>/dev/null; then
+		json_get_keys keys
+		for key in $keys; do
+			json_select "$key" 2>/dev/null || continue
+			json_get_var an name
+			case "$an" in
+			*nradio_c2000-ultra-squashfs-sysupgrade.bin)
+				json_get_var url browser_download_url
+				json_get_var size size
+				# GitHub API asset digest (sha256) is fetched over the
+				# reachable api.github.com host and is the trust anchor
+				json_get_var dg digest
+				sha=$(printf '%s' "$dg" | sed -n 's/^sha256://p')
+				;;
+			sha256sums)
+				json_get_var sha_url browser_download_url
+				;;
+			esac
+			json_select ..
+		done
+		json_select ..
+	fi
+	json_cleanup
+
+	[ -n "$url" ] || {
+		json_init
+		json_add_string "error" "最新 Release 中未找到 sysupgrade 固件资产"
+		json_dump
+		return 1
+	}
+
+	cur_info
+	# release tags may carry the short form (r38246) or the full revision
+	# (r38246-24c13d794c); treat as same base when it prefixes the running one
+	tag_rev=$(printf '%s' "$tag" | sed -n 's/.*\(r[0-9][0-9]*\).*/\1/p')
+	same=0
+	case "$CUR_REV" in
+	"$tag_rev"|"$tag_rev"-*) same=1 ;;
+	esac
+
+	json_init
+	json_add_string "tag" "$tag"
+	json_add_string "rev" "$tag_rev"
+	json_add_string "published" "$pub"
+	json_add_string "url" "$url"
+	json_add_int "size" "${size:-0}"
+	json_add_string "sha256" "$sha"
+	json_add_string "sha_url" "$sha_url"
+	json_add_int "same_base" "$same"
+	json_add_string "current_rev" "$CUR_REV"
+	json_add_string "current_date" "$CUR_DATE"
+	json_dump
+}
+
+do_download() {
+	local url="$1" expected="$2" mirror="${3:-}"
+	[ -n "$url" ] || return 1
+
+	# github.com release downloads may be unreachable on CN uplinks; an
+	# optional mirror prefix (gh proxy) is honored — integrity still comes
+	# from the api.github.com digest comparison, not the mirror
+	case "$mirror" in
+	*github.com*|*"") ;;
+	*)
+		case "$mirror" in
+		*/) url="${mirror}${url}" ;;
+		*)  url="${mirror}/${url}" ;;
+		esac
+		;;
+	esac
+
+	rm -f "$PART" "$BIN"
+	state_set state downloading expected "$expected" total 0
+
+	# Fully detached worker: survives the rpcd exec call that spawned it
+	setsid sh -c '
+		url="$1"; part="$2"; bin="$3"; state="$4"; expected="$5"
+		echo "state=downloading" > "$state"
+		echo "expected=$expected" >> "$state"
+		wget -q -T 90 -O "$part" "$url"
+		rc=$?
+		if [ "$rc" != "0" ] || [ ! -s "$part" ]; then
+			echo "state=error" > "$state"
+			echo "msg=下载失败（wget rc=$rc）。github.com 直连不通时，可在下载前填写加速前缀（如 https://ghfast.top/）重试" >> "$state"
+			rm -f "$part"
+			exit 1
+		fi
+		got=$(sha256sum "$part" | cut -d" " -f1)
+		if [ -n "$expected" ] && [ "$got" != "$expected" ]; then
+			echo "state=error" > "$state"
+			echo "msg=SHA-256 校验失败（$got）" >> "$state"
+			rm -f "$part"
+			exit 1
+		fi
+		mv "$part" "$bin"
+		echo "state=done" > "$state"
+		echo "sha256=$got" >> "$state"
+	' -- "$url" "$PART" "$BIN" "$STATE" "$expected" >/dev/null 2>&1 &
+
+	json_init
+	json_add_string "started" "1"
+	json_dump
+}
+
+do_status() {
+	local st="" expected="" got_bytes=0 msg="" sha=""
+	if [ -f "$STATE" ]; then
+		st=$(sed -n 's/^state=//p' "$STATE" | tail -n 1)
+		expected=$(sed -n 's/^expected=//p' "$STATE" | tail -n 1)
+		msg=$(sed -n 's/^msg=//p' "$STATE" | tail -n 1)
+		sha=$(sed -n 's/^sha256=//p' "$STATE" | tail -n 1)
+	fi
+	[ -n "$st" ] || st="idle"
+	if [ -f "$PART" ]; then
+		got_bytes=$(wc -c < "$PART" | tr -d ' ')
+	elif [ -f "$BIN" ]; then
+		got_bytes=$(wc -c < "$BIN" | tr -d ' ')
+	fi
+
+	json_init
+	json_add_string "state" "$st"
+	json_add_int "bytes" "$got_bytes"
+	json_add_string "expected" "$expected"
+	json_add_string "sha256" "$sha"
+	json_add_string "msg" "$msg"
+	json_add_boolean "have_image" $([ -f "$BIN" ] && echo 1 || echo 0)
+	json_add_string "path" "$BIN"
+	json_dump
+}
+
+do_preflight() {
+	local ok=0 msg="" sha=""
+	if [ -s "$BIN" ]; then
+		sha=$(sha256sum "$BIN" | cut -d" " -f1)
+		expected=$(sed -n 's/^expected=//p' "$STATE" 2>/dev/null | tail -n 1)
+		if [ -z "$expected" ] || [ "$sha" = "$expected" ]; then
+			ok=1
+		else
+			msg="SHA-256 与 Release 不一致，请重新下载"
+		fi
+	else
+		msg="尚未下载固件"
+	fi
+	json_init
+	json_add_int "ready" "$ok"
+	json_add_string "sha256" "$sha"
+	json_add_string "msg" "$msg"
+	json_dump
+	[ "$ok" = "1" ]
+}
+
+case "${1:-}" in
+check)
+	do_check
+	;;
+download)
+	do_download "${2:-}" "${3:-}"
+	;;
+status)
+	do_status
+	;;
+preflight)
+	do_preflight
+	;;
+*)
+	echo "Usage: $0 {check|download <url> <sha256> [mirror-prefix]|status|preflight}" >&2
+	exit 1
+	;;
+esac
