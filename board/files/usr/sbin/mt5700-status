@@ -415,7 +415,7 @@ T_LIVE_RX=""; T_LIVE_TX=""; T_UPTIME=""
 	T_LIVE_TX=$(cat "/sys/class/net/$MODEM_NET/statistics/tx_bytes" 2>/dev/null | tr -cd '0-9')
 }
 T_UPTIME=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e '@.uptime' 2>/dev/null)
-[ -f "$TRAFFIC_DB" ] && eval "$(sed -n 's/^\([a-z_]*\)=\([0-9]*\)$/\1=\2/p' "$TRAFFIC_DB")"
+[ -f "$TRAFFIC_DB" ] && eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$TRAFFIC_DB")"
 json_add_object "traffic"
 json_add_string "live_rx" "${T_LIVE_RX:-0}"
 json_add_string "live_tx" "${T_LIVE_TX:-0}"
@@ -426,6 +426,18 @@ json_add_int "mon_rx" "${mon_rx:-0}"
 json_add_int "mon_tx" "${mon_tx:-0}"
 json_add_string "tot_rx" "${tot_rx:-0}"
 json_add_string "tot_tx" "${tot_tx:-0}"
+# quota / billing-period configuration and derived state for the UI
+T_LIMIT_MB=$(uci -q get mt5700.modem.traffic_limit_mb | tr -cd '0-9')
+T_RESET_DAY=$(uci -q get mt5700.modem.traffic_reset_day | tr -cd '0-9')
+T_ACTION=$(uci -q get mt5700.modem.traffic_action)
+[ -n "$T_LIMIT_MB" ] || T_LIMIT_MB=""
+[ -n "$T_RESET_DAY" ] || T_RESET_DAY=1
+[ -n "$T_ACTION" ] || T_ACTION=notify
+json_add_string "limit_mb" "$T_LIMIT_MB"
+json_add_int "reset_day" "$T_RESET_DAY"
+json_add_string "action" "$T_ACTION"
+json_add_string "period_key" "${mon_key:-}"
+json_add_int "over_limit" $([ -n "$T_LIMIT_MB" ] && [ $(( ( ${mon_rx:-0} + ${mon_tx:-0} ) / 1048576 )) -ge "$T_LIMIT_MB" ] && echo 1 || echo 0)
 json_close_object
 
 json_add_string "temp_dc" "$TEMP_DC"

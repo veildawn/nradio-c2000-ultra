@@ -469,6 +469,35 @@ return view.extend({
 		C.tot.textContent = '下行 %s ｜ 上行 %s ｜ 合计 %s'.format(
 			fmtBytes(tr.tot_rx), fmtBytes(tr.tot_tx), fmtBytes(Number(tr.tot_rx) + Number(tr.tot_tx)));
 
+		/* quota / billing-period display */
+		var qWrap = this.quotaWrap;
+		if (qWrap) {
+			var limit = num(tr.limit_mb);
+			var monUsed = (num(tr.mon_rx) + num(tr.mon_tx)) || 0;
+			if (limit !== null && limit > 0) {
+				var limitB = limit * 1048576,
+				    pct = Math.min(999, Math.round(monUsed / limitB * 100)),
+				    over = (num(tr.over_limit) === 1),
+				    color = over ? '#d9534f' : (pct >= 80 ? '#f0ad4e' : '#2eb872');
+				this.quotaFill.style.width = Math.min(100, pct) + '%';
+				this.quotaFill.style.background = color;
+				var qparts = [ '%s / %s（%d%%）'.format(fmtBytes(monUsed), fmtBytes(limitB), pct) ];
+				if (over)
+					qparts.push((tr.action == 'offline') ? '⚠ 已超限，蜂窝已按设置断开' : '⚠ 已超限（提醒模式）');
+				C.quota.replaceChildren(
+					E('span', {}, qparts.join('　')),
+					over ? E('b', { 'style': 'color:#d9534f;margin-left:.4em;' }, '⚠') : ''
+				);
+				C.quota.title = 'billing period ' + (tr.period_key || '');
+				qWrap.style.display = '';
+			}
+			else {
+				C.quota.textContent = '未设置限额（可在「设置」中配置月度限额与重置日）';
+				qWrap.style.display = '';
+				this.quotaFill.style.width = '0%';
+			}
+		}
+
 		/* client-side rate from consecutive live counter samples */
 		var now = Date.now();
 		if (this.lastTraffic && tr.live_rx !== undefined) {
@@ -512,12 +541,14 @@ return view.extend({
 		var self = this;
 		['modem','sim','imsi','reg','sig','wwan','temp','meta','imei','uptime',
 		 'cellrat','celltable','qci','qcitable','pdp4','pdp6','cids','ndis','syscfg','nwtime',
-		 'sess','day','mon','tot','raterx','ratetx','ambrdl','ambrul','apnsub'].forEach(function(k) {
+		 'sess','day','mon','tot','raterx','ratetx','ambrdl','ambrul','apnsub','quota'].forEach(function(k) {
 			self.cells[k] = E('em', { 'id': 'mt5700_' + k }, '…');
 		});
 		var C = this.cells;
 		this.canvasRx = E('canvas', { 'width': 320, 'height': 56, 'data-color': '#2eb872', 'style': 'width:320px;max-width:100%;height:56px;' });
 		this.canvasTx = E('canvas', { 'width': 320, 'height': 56, 'data-color': '#4a90d9', 'style': 'width:320px;max-width:100%;height:56px;' });
+		this.quotaFill = E('div', { 'style': 'height:100%;width:0;background:#2eb872;transition:width .5s,background .5s;' });
+		this.quotaWrap = E('div', { 'style': 'margin:0 0 .6em;' });
 
 		var tabs = this.buildTabs();
 		var B = tabs.bodies;
@@ -563,6 +594,12 @@ return view.extend({
 			'签约速率（APN-AMBR）由 AT^DSAMBR 读取运营商套餐签约值，实际速率受信号与网络调度影响；QCI/5QI 由 AT+CGEQOSRDP 读取网络协商值（5G SA 下即 5QI）。'));
 
 		/* --- traffic --- */
+		this.quotaWrap.replaceChildren(
+			E('div', { 'style': 'font-weight:bold;margin-bottom:.3em;' }, '本月限额'),
+			E('div', { 'style': 'background:rgba(128,128,128,.2);border-radius:4px;height:14px;overflow:hidden;' }, [ this.quotaFill ]),
+			E('div', { 'style': 'font-size:small;margin:.25em 0;' }, [ C.quota ])
+		);
+		B.traffic.appendChild(this.quotaWrap);
 		B.traffic.appendChild(E('div', { 'style': 'display:flex;gap:2em;flex-wrap:wrap;margin:.5em 0 1em;' }, [
 			E('div', {}, [ E('div', { 'style': 'font-weight:bold;' }, '实时速率'), E('div', { 'style': 'display:flex;gap:1.5em;margin:.3em 0;' }, [ C.raterx, C.ratetx ]), this.canvasRx, this.canvasTx ]),
 			E('div', { 'style': 'min-width:260px;flex:1;' }, this.tableFromRows([
@@ -605,6 +642,23 @@ return view.extend({
 		o.value('nr', '仅 5G NR');
 		o.value('lte', '仅 LTE');
 		o.default = 'auto';
+		o.rmempty = false;
+
+		var s3 = m.section(form.NamedSection, 'modem', 'mt5700', '流量限额');
+
+		var o = s3.option(form.Value, 'traffic_limit_mb', '月度限额（MB）', '留空或 0 表示不限。按下方「重置日」划分的账期统计（下行+上行合计）。');
+		o.placeholder = '不限';
+		o.datatype = 'and(uinteger,min(0))';
+
+		var o = s3.option(form.Value, 'traffic_reset_day', '账期重置日（几号）', '每月第几号结转流量账目（1–31；短月自动按月末处理），默认 1 号。');
+		o.placeholder = '1';
+		o.rmempty = false;
+		o.datatype = 'and(uinteger,min(1),max(31))';
+
+		var o = s3.option(form.ListValue, 'traffic_action', '超限动作', '「断开蜂窝」会在超限后断开并停止拨号，直到下个账期或调高/取消限额；「仅提醒」只在页面标红提示。');
+		o.value('notify', '仅提醒（页面标红）');
+		o.value('offline', '断开蜂窝（直至下个账期）');
+		o.default = 'notify';
 		o.rmempty = false;
 
 		var s2 = m.section(form.NamedSection, 'modem', 'mt5700', '高级设置');

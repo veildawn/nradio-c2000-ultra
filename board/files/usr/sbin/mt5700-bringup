@@ -550,12 +550,60 @@ refresh_status_raw() {
 	esac
 }
 
-# Persistent traffic accounting (day / month / total buckets) fed from the
-# modem netdev kernel counters; survives reboots in /etc/mt5700/traffic.db.
+# Persistent traffic accounting (day / billing-period / total buckets) fed
+# from the modem netdev kernel counters; survives reboots in
+# /etc/mt5700/traffic.db. The monthly bucket follows a configurable billing
+# anchor day (uci mt5700.modem.traffic_reset_day): the period containing date
+# D runs from anchor-day in D's month (or the previous month when D is before
+# the anchor) up to the day before the next anchor.
 TRAFFIC_DB="/etc/mt5700/traffic.db"
 
+traffic_reset_day() {
+	local rd
+	rd=$(uci -q get mt5700.modem.traffic_reset_day | tr -cd '0-9')
+	case "$rd" in
+	""|0) echo 1 ;;
+	*) [ "$rd" -ge 1 ] && [ "$rd" -le 31 ] && echo "$rd" || echo 1 ;;
+	esac
+}
+
+traffic_days_in_month() {
+	# $1=YYYY $2=MM -> last day (Gregorian leap rules)
+	local y=$1 m=$2
+	case "$m" in
+	01|03|05|07|08|10|12) echo 31 ;;
+	04|06|09|11) echo 30 ;;
+	02)
+		if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then
+			echo 29
+		else
+			echo 28
+		fi
+		;;
+	esac
+}
+
+traffic_period_key() {
+	# prints "<anchorY>-<anchorM>:<rd>" for the billing period containing today
+	local rd y m d ldm anchor_d ay am
+	rd=$(traffic_reset_day)
+	y=$(date +%Y); m=$(date +%m); d=$(date +%d)
+	ldm=$(traffic_days_in_month "$y" "$m")
+	# effective anchor day when the month is shorter than the configured day
+	[ "$rd" -le "$ldm" ] && anchor_d=$rd || anchor_d=$ldm
+	if [ "${d#0}" -ge "$anchor_d" ]; then
+		echo "$y-$m:$rd"
+	else
+		case "$m" in
+		01) ay=$((y - 1)); am=12 ;;
+		*)  ay=$y; am=$(printf '%02d' $(( ${m#0} - 1 ))) ;;
+		esac
+		echo "$ay-$am:$rd"
+	fi
+}
+
 record_traffic() {
-	local net="$MODEM_NET" rx tx now day mon old_day old_mon
+	local net="$MODEM_NET" rx tx now day mon
 	local day_rx day_tx mon_rx mon_tx tot_rx tot_tx last_rx last_tx
 	[ -n "$net" ] && [ -d "/sys/class/net/$net/statistics" ] || return 0
 	rx=$(cat "/sys/class/net/$net/statistics/rx_bytes" 2>/dev/null | tr -cd '0-9')
@@ -563,7 +611,7 @@ record_traffic() {
 	[ -n "$rx" ] && [ -n "$tx" ] || return 0
 	now=$(date +%s)
 	day=$(date +%Y-%m-%d)
-	mon=$(date +%Y-%m)
+	mon=$(traffic_period_key)
 
 	if [ -f "$TRAFFIC_DB" ]; then
 		eval "$(sed -n 's/^\([a-z_]*\)=\([^ ]*\)$/\1="\2"/p' "$TRAFFIC_DB")"
@@ -583,12 +631,30 @@ record_traffic() {
 		day_rx=$((day_rx + drx)); day_tx=$((day_tx + dtx))
 		mon_rx=$((mon_rx + drx)); mon_tx=$((mon_tx + dtx))
 		tot_rx=$((tot_rx + drx)); tot_tx=$((tot_tx + dtx))
-		[ $((drx + dtx)) -eq 0 ] && [ "$old_day" = "$day" ] && return 0
+		[ $((drx + dtx)) -eq 0 ] && [ "$old_day" = "$day" ] && [ "$old_mon" = "$mon" ] && return 0
 	fi
 
 	mkdir -p /etc/mt5700
 	printf 'day_key=%s\nmon_key=%s\nday_rx=%d\nday_tx=%d\nmon_rx=%d\nmon_tx=%d\ntot_rx=%d\ntot_tx=%d\nlast_rx=%s\nlast_tx=%s\nupdated=%s\n' \
 		"$day" "$mon" "$day_rx" "$day_tx" "$mon_rx" "$mon_tx" "$tot_rx" "$tot_tx" "$rx" "$tx" "$now" > "$TRAFFIC_DB"
+}
+
+# Returns 0 when a configured monthly limit is exceeded (billing-period
+# bucket). Enforcement ('offline') tears the session down and gates dialing;
+# 'notify' only reports through mt5700-status for the LuCI badge.
+traffic_over_limit() {
+	local limit_mb action used
+	limit_mb=$(uci -q get mt5700.modem.traffic_limit_mb | tr -cd '0-9')
+	[ -n "$limit_mb" ] || return 1
+	[ "$limit_mb" -gt 0 ] || return 1
+	[ -f "$TRAFFIC_DB" ] || return 1
+	local mon_rx=0 mon_tx=0
+	eval "$(sed -n 's/^\(mon_rx\|mon_tx\)=\([0-9]*\)$/\1=\2/p' "$TRAFFIC_DB")"
+	used=$(( (mon_rx + mon_tx) / 1048576 ))
+	[ "$used" -ge "$limit_mb" ] || return 1
+	action=$(uci -q get mt5700.modem.traffic_action)
+	[ "$action" = "offline" ] || return 2
+	return 0
 }
 
 # Honor the UI "clear traffic statistics" marker: wipe the requested bucket
@@ -683,6 +749,24 @@ bringup_once() {
 
 	# Account traffic before anything below may reshuffle the netdev
 	record_traffic
+
+	# Monthly quota gate: 'offline' action tears the session down and stops
+	# dialing until the billing period rolls over or the limit is lifted
+	traffic_over_limit
+	case $? in
+	0)
+		ifdown wwan >/dev/null 2>&1
+		set_cellular_leds 0 0
+		if [ ! -f /tmp/mt5700.traffic_gate ]; then
+			touch /tmp/mt5700.traffic_gate
+			log "Monthly traffic limit reached; cellular set offline until next billing period (uci mt5700.modem.traffic_*)"
+		fi
+		return 0
+		;;
+	*)
+		rm -f /tmp/mt5700.traffic_gate
+		;;
+	esac
 
 	# Optional UI network-mode preference (nr/lte/auto)
 	apply_netmode "$netmode"
