@@ -1,7 +1,0 @@
-{% include('header') %}
-{% if (theme == 'astryx'): %}
-<div id="nr-spa-outlet"></div>
-{% else %}
-<script>location.replace({{ sprintf('%J', dispatcher.build_url('admin/status/overview')) }});</script>
-{% endif %}
-{% include('footer') %}
