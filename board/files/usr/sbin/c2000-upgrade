@@ -25,12 +25,24 @@ umask 077
 
 cur_info() {
 	local b
+	CUR_REV="" CUR_DATE="" CUR_KERNEL="$(uname -r 2>/dev/null)"
 	b=$(ubus call system board 2>/dev/null)
-	json_load "$b"
-	json_select release
-	json_get_var CUR_REV revision
-	json_get_var CUR_DATE builddate
-	json_cleanup
+	if [ -n "$b" ]; then
+		json_load "$b"
+		if json_select release 2>/dev/null; then
+			json_get_var CUR_REV revision
+			json_get_var CUR_DATE builddate
+			json_select ..
+		fi
+		json_cleanup
+	fi
+	if [ -z "$CUR_DATE" ]; then
+		if [ -e /rom/etc/openwrt_release ]; then
+			CUR_DATE=$(date -r /rom/etc/openwrt_release +%s 2>/dev/null | tr -cd '0-9')
+		elif [ -e /etc/openwrt_release ]; then
+			CUR_DATE=$(date -r /etc/openwrt_release +%s 2>/dev/null | tr -cd '0-9')
+		fi
+	fi
 }
 
 do_info() {
@@ -39,6 +51,7 @@ do_info() {
 	json_add_string "current_tag" "$(cat "$RELEASE_FILE" 2>/dev/null)"
 	json_add_string "current_rev" "$CUR_REV"
 	json_add_string "current_date" "$CUR_DATE"
+	json_add_string "current_kernel" "$CUR_KERNEL"
 	json_dump
 }
 
@@ -109,7 +122,7 @@ release_lock() {
 }
 
 do_check() {
-	local raw tag pub url size sha sha_url rel_rev same rel_name rel_kver cur_kver kmatch age
+	local raw tag pub url size sha sha_url rel_rev same rel_name rel_body notes_trimmed rel_kver cur_kver kmatch age
 	if [ "${1:-}" != "force" ] && [ -s "$CACHE" ]; then
 		age=$(( $(date +%s) - $(date -r "$CACHE" +%s) ))
 		if [ "$age" -ge 0 ] && [ "$age" -lt 300 ]; then cat "$CACHE"; return 0; fi
@@ -129,6 +142,7 @@ do_check() {
 	json_get_var tag tag_name
 	json_get_var pub published_at
 	json_get_var rel_name name
+	json_get_var rel_body body
 	url=""
 	size=""
 	sha=""
@@ -178,14 +192,14 @@ do_check() {
 	# built on a different kernel must not be flashed online (old kernel +
 	# new modules = broken USB/Wi-Fi). Release names carry "Linux <ver>".
 	rel_kver=$(printf '%s' "$rel_name" | sed -n 's/.*Linux \([0-9][0-9.]*\).*/\1/p')
-	cur_kver=$(uname -r)
+	cur_info
+	cur_kver="$CUR_KERNEL"
 	kmatch=-1
 	if [ -n "$rel_kver" ] && [ -n "$cur_kver" ]; then
 		kmatch=1
 		[ "$rel_kver" != "$cur_kver" ] && kmatch=0
 	fi
 
-	cur_info
 	# CI puts the actual OpenWrt revision in the title. Older releases
 	# may identify their baseline only in the tag.
 	rel_rev=$(printf '%s\n' "$rel_name" | sed -n 's/^OpenWrt Snapshot \(r[0-9][0-9]*-[0-9a-f][0-9a-f]*\) (Linux .*/\1/p')
@@ -200,6 +214,8 @@ do_check() {
 			;;
 		esac
 	fi
+	notes_trimmed=""
+	[ -n "$rel_body" ] && notes_trimmed=$(printf '%.2000s' "$rel_body")
 
 	json_init
 	json_add_string "tag" "$tag"
@@ -213,8 +229,10 @@ do_check() {
 	json_add_int "kernel_match" "$kmatch"
 	json_add_string "release_kernel" "$rel_kver"
 	json_add_string "current_kernel" "$cur_kver"
+	json_add_string "current_tag" "$(cat "$RELEASE_FILE" 2>/dev/null)"
 	json_add_string "current_rev" "$CUR_REV"
 	json_add_string "current_date" "$CUR_DATE"
+	json_add_string "notes" "$notes_trimmed"
 	json_dump > "$CACHE.$$" && mv -f "$CACHE.$$" "$CACHE"
 	cat "$CACHE"
 }
