@@ -82,6 +82,10 @@ def main() -> None:
     ib = args.ib_dir.resolve()
     board_dir = args.board_dir.resolve()
 
+    for asset in ("astryx.js", "astryx.css", "THIRD-PARTY-NOTICES.txt"):
+        if not (board_dir / "files/www/luci-static/astryx" / asset).is_file():
+            sys.exit("Astryx assets are missing. Run npm --prefix ui/astryx ci && npm --prefix ui/astryx run build first.")
+
     kdirs = sorted(ib.glob("build_dir/target-*/linux-mediatek_filogic"))
     if not kdirs:
         sys.exit(f"ERROR: linux-mediatek_filogic build_dir not found under {ib}")

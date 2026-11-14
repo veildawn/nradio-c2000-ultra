@@ -78,8 +78,8 @@ window.fs = { async exec(path, args = []) {
 }};
 window.mount = async function(source) {
     window.current = new Function('view', 'fs', 'ui', 'poll', 'form', 'L', 'E', source)(
-        {extend: x => x}, fs, ui, poll, form, L, E);
-    document.body.append(await current.render(await current.load()));
+        {extend: x => x}, window.fs, window.ui, window.poll, window.form, window.L, window.E);
+    document.body.append(await window.current.render(await window.current.load()));
 };
 '''
 

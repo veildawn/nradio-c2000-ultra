@@ -1,0 +1,9 @@
+#!/bin/sh
+# Install the complete Astryx management theme after assets are staged.
+[ -s /www/luci-static/astryx/astryx.js ] || exit 1
+[ -s /www/luci-static/astryx/astryx.css ] || exit 1
+uci -q get luci.main >/dev/null || exit 1
+uci set luci.themes.Astryx='/luci-static/astryx'
+uci set luci.main.mediaurlbase='/luci-static/astryx'
+uci commit luci
+exit 0

@@ -66,6 +66,15 @@ python3 -m unittest discover -s tests -v
 
 ## 编译与定制打包方式
 
+先构建 Astryx 管理界面（Node.js 24，在本仓库根目录运行）：
+
+```bash
+npm --prefix ui/astryx ci
+npm --prefix ui/astryx run build
+```
+
+固件默认启用 Astryx 登录、导航、全局搜索与浅色/深色主题，所有现有 LuCI 管理页及插件通过同一主题访问，保留原有认证、权限和配置回滚逻辑。新主题尚未上机验收；预览、单独安装及恢复说明见 [ui/astryx/README.md](ui/astryx/README.md)。下面两种打包方式均检查构建资源，GitHub Actions 会自动完成此步骤。
+
 ### 方式一：官方 ImageBuilder 极速定制打包（推荐，约 30 秒）
 
 使用 `board/inject_imagebuilder.py` 可将板级 DTB、`0x40080000` FIT 内核与板级脚本直接注入官方 OpenWrt Snapshot `mediatek/filogic` ImageBuilder：

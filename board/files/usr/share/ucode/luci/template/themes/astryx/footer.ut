@@ -1,0 +1,8 @@
+		{% if (!blank_page): %}
+		</main>
+		<footer class="nr-version">NRadio C2000 Ultra <span>·</span> {{ version.distversion ?? 'OpenWrt' }}</footer>
+		{% if (ctx.authsession): %}<script>L.require('menu-astryx');</script>{% endif %}
+		<script type="module" src="{{ media }}/astryx.js"></script>
+		{% endif %}
+	</body>
+</html>
