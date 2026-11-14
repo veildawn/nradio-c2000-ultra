@@ -5,14 +5,10 @@
 			"file": {
 				"/usr/sbin/mt5700-status": [
 					"exec"
-				],
-				"/usr/sbin/nr-app-status": [
-					"exec"
 				]
 			},
 			"uci": [
-				"mt5700",
-				"nrapp"
+				"mt5700"
 			]
 		},
 		"write": {
@@ -31,17 +27,10 @@
 				],
 				"/sbin/sysupgrade": [
 					"exec"
-				],
-				"/usr/sbin/nr-app-status": [
-					"exec"
-				],
-				"/etc/init.d/nr-apptrack": [
-					"exec"
 				]
 			},
 			"uci": [
-				"mt5700",
-				"nrapp"
+				"mt5700"
 			]
 		}
 	}

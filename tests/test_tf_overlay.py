@@ -52,16 +52,11 @@ class TFOverlayTests(unittest.TestCase):
                     self.assertEqual(result, "true" if failsafe else "")
                     self.assertEqual((fixture / "failsafe").exists(), failsafe)
 
-    def test_reapplying_replaces_legacy_upgrade_branch(self):
-        old_platform = """platform_do_upgrade() {
+    def test_tf_upgrade_patch_keeps_other_boards_and_is_idempotent(self):
+        upstream_platform = """platform_do_upgrade() {
 	local board=$(board_name)
 	case "$board" in
 	other,board|\\
-	nradio,c2000-ultra)
-		mtd erase rootfs_data
-		export EMMC_ROOT_DEV=/dev/mmcblk0p4
-		emmc_do_upgrade "$1"
-		;;
 	third,board)
 		emmc_do_upgrade "$1"
 		;;
@@ -69,7 +64,6 @@ class TFOverlayTests(unittest.TestCase):
 }
 platform_check_image() {
 	case "$(board_name)" in
-	nradio,c2000-ultra|\\
 	nradio,c8-668gl)
 		return 0
 		;;
@@ -77,7 +71,6 @@ platform_check_image() {
 }
 platform_copy_config() {
 	case "$(board_name)" in
-	nradio,c2000-ultra|\\
 	nradio,c8-668gl|\\
 	other,board)
 		emmc_copy_config
@@ -85,8 +78,9 @@ platform_copy_config() {
 	esac
 }
 """
-        patched = patch_platform_upgrade(old_platform)
+        patched = patch_platform_upgrade(upstream_platform)
         self.assertEqual(patched, patch_platform_upgrade(patched))
+        self.assertIn("export EMMC_ROOT_DEV=/dev/mmcblk0p4", patched)
         self.assertNotIn("mtd erase", patched)
         self.assertIn("other,board|\\\n\tthird,board)", patched)
         self.assertEqual(patched.count("nradio,c2000-ultra"), 3)

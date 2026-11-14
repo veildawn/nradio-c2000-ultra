@@ -1,0 +1,12 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+[ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
+
+board_config_update
+ucidef_set_country CN
+ucidef_set_wireless 2g NRadio-C2000-2G sae-mixed 12345678
+ucidef_set_wireless 5g NRadio-C2000-5G sae-mixed 12345678
+board_config_flush
