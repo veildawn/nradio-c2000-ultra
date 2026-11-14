@@ -1,6 +1,9 @@
 name: OpenWrt ImageBuilder (NRadio C2000 Ultra)
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     tags:
       - "v*"
@@ -16,6 +19,10 @@ on:
         required: false
         default: false
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: write
 
@@ -25,6 +32,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Lint board scripts and Python tooling
+        run: |
+          python3 -m py_compile board/apply.py board/inject_imagebuilder.py
+          find board/files -type f ! -name '*.gcom' ! -name '*.conf' ! -path '*/etc/config/*' -exec sh -n {} +
 
       - name: Install host prerequisites
         run: |
@@ -57,8 +69,21 @@ jobs:
             PACKAGES="kmod-usb-net-cdc-ether ${EXTRA_PKGS}" \
             FILES="files-c2000-ultra"
 
-      - name: Stage release artifacts and checksums
+      - name: Verify sysupgrade metadata and stage artifacts
         run: |
+          BIN="/tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra-squashfs-sysupgrade.bin"
+          /tmp/ib/extracted/staging_dir/host/bin/fwtool -i /tmp/ib/meta.json "$BIN"
+          python3 - <<'PY'
+          import json, tarfile
+          with open("/tmp/ib/meta.json") as f:
+              meta = json.load(f)
+          assert meta["compat_version"] == "1.0", meta
+          expected = {"nradio,c2000-ultra", "NRadio-C2000MAX-798", "NRadio-C2000MAX-Ultra", "NRadio-C2000Ultra"}
+          assert expected == set(meta["supported_devices"]), meta["supported_devices"]
+          with tarfile.open("/tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra-squashfs-sysupgrade.bin", "r") as tf:
+              names = tf.getnames()
+              assert any(n.endswith("/CONTROL") for n in names) and any(n.endswith("/kernel") for n in names) and any(n.endswith("/root") for n in names), names
+          PY
           cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/openwrt-mediatek-filogic-nradio_c2000-ultra* /tmp/ib/release/
           cp -f /tmp/ib/extracted/bin/targets/mediatek/filogic/profiles.json /tmp/ib/release/
           cp -f /tmp/ib/extracted/build_dir/target-*/linux-mediatek_filogic/image-mt7987a-nradio-c2000ultra.dtb /tmp/ib/release/
