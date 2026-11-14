@@ -200,15 +200,15 @@ function App() {
                 {hostname}
                 <small>{root.dataset.model || "C2000 Ultra"}</small>
               </span>
-              <span className="nr-local-dot" />
             </div>
-            <div className="nr-nav-caption">{t("管理中心", "MANAGEMENT")}</div>
+            <div className="nr-nav-caption">{t("管理中心", "Management")}</div>
             <nav>
               <div className="nr-desktop-tabs">
                 {tabs.map((tab) => (
                   <button
                     key={tab}
                     className={route.tab === tab ? "is-active" : ""}
+                    aria-current={route.tab === tab ? "page" : undefined}
                     onClick={() => selectTab(tab)}
                   >
                     <Icon name={tab} />
@@ -217,7 +217,7 @@ function App() {
                 ))}
               </div>
               <div className="nr-nav-caption nr-all-settings">
-                {t("全部设置", "ALL SETTINGS")}
+                {t("全部设置", "All settings")}
               </div>
               {menu.menu.map((node) => (
                 <MenuGroup
@@ -267,13 +267,17 @@ function App() {
               {dirty && (
                 <span className="nr-dirty-badge">{t("未保存", "Unsaved")}</span>
               )}
-              <Button
-                label={t("搜索设置", "Search settings")}
-                variant="ghost"
-                icon={<Icon name="search" />}
-                isIconOnly
+              <button
+                className="nr-search-trigger"
+                aria-label={t("搜索设置", "Search settings")}
                 onClick={() => setSearch(true)}
-              />
+              >
+                <Icon name="search" />
+                <span>{t("搜索设置", "Search settings")}</span>
+                <kbd aria-hidden="true">
+                  {navigator.platform.includes("Mac") ? "⌘ K" : "Ctrl K"}
+                </kbd>
+              </button>
               <Button
                 label={toggleLabel}
                 variant="ghost"
@@ -298,7 +302,7 @@ function App() {
                 }}
               >
                 <span className="nr-tab-icon">
-                  <Icon name={tab} size={23} />
+                  <Icon name={tab} size={22} />
                 </span>
                 <span>{titles[tab]}</span>
               </a>
@@ -349,7 +353,7 @@ function App() {
           )}
           <Dialog isOpen={search} onOpenChange={setSearch} width={620}>
             <DialogHeader
-              title={t("找到你需要的设置", "Find a setting")}
+              title={t("搜索设置", "Search settings")}
               onOpenChange={setSearch}
             />
             <div className="nr-search-body">
@@ -440,29 +444,34 @@ function App() {
             <Brand />
           </div>
           <div className="nr-login-hero">
-            <span className="nr-eyebrow">NRADIO / NETWORK OS</span>
+            <span className="nr-eyebrow">
+              {t("本地设备管理", "Local device management")}
+            </span>
             <h1>
-              {t("每一处连接，", "Every connection.")}
+              {t("管理你的", "Manage your")}
               <br />
-              {t("清晰可见。", "Clearly in view.")}
+              {t("NRadio 网络", "NRadio network")}
             </h1>
             <p>
               {t(
-                "从无线网络到 5G 蜂窝，在一个界面中掌握你的设备。",
-                "Wireless, cellular and your device — together in one place.",
+                "查看连接状态，配置 Wi-Fi 与 5G 蜂窝网络。",
+                "Check connections and configure Wi-Fi and cellular access.",
               )}
             </p>
-            <div className="nr-network-art" aria-hidden="true">
-              <div className="nr-orbit orbit-one" />
-              <div className="nr-orbit orbit-two" />
-              <div className="nr-orbit orbit-three" />
-              <span className="nr-art-core">
-                <Icon name="network" size={54} />
-              </span>
-              <span className="nr-art-label label-one">5G</span>
-              <span className="nr-art-label label-two">Wi-Fi 7</span>
-              <span className="nr-art-label label-three">2.5 GbE</span>
-            </div>
+            <ul className="nr-login-features">
+              <li>
+                <Icon name="network" />
+                {t("网络配置", "Network configuration")}
+              </li>
+              <li>
+                <Icon name="cellular" />
+                {t("5G 蜂窝", "5G cellular")}
+              </li>
+              <li>
+                <Icon name="system" />
+                {t("系统维护", "System maintenance")}
+              </li>
+            </ul>
           </div>
           <div className="nr-login-theme">
             <Button

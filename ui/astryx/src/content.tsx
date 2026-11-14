@@ -121,6 +121,8 @@ const descriptions: Record<string, [string, string]> = {
   cellular: ["SIM、信号与蜂窝上网", "SIM, signal and cellular access"],
   dhcp: ["地址分配与域名解析", "Address allocation and DNS"],
   firewall: ["区域、规则与端口转发", "Zones, rules and port forwarding"],
+  apps: ["应用访问统计与限制", "Application activity and access control"],
+  routing: ["静态路由与路由规则", "Static routes and routing rules"],
   system: ["设备、时间与语言", "Device, time and language"],
   admin: ["密码与管理权限", "Password and access"],
   flash: ["备份、恢复与固件", "Backup, restore and firmware"],
@@ -193,24 +195,28 @@ function Hub({ route, menu, navigate, scroll, onTitle, onState }: Props) {
       )}
       <div className="nr-hub-heading">
         <div>
-          <p className="nr-eyebrow">
-            {root.dataset.hostname || "NRadio"} / NETWORK OS
-          </p>
           <h1>
             {route.tab === "overview"
-              ? t("我的网络", "My network")
+              ? t("设备总览", "Device overview")
               : titles[route.tab]}
           </h1>
           <p>
             {route.tab === "overview"
               ? t(
-                  "每一处连接，清晰可见。",
-                  "Every connection, clearly in view.",
+                  "连接状态与设备资源",
+                  "Connections and device resources",
                 )
-              : t(
-                  "轻点一项，管理你的设备。",
-                  "Choose a setting to manage your device.",
-                )}
+              : route.tab === "network"
+                ? t(
+                    "接口、无线与访问规则",
+                    "Interfaces, wireless and access rules",
+                  )
+                : route.tab === "system"
+                  ? t(
+                      "设备配置、固件与维护",
+                      "Device configuration, firmware and maintenance",
+                    )
+                  : t("已安装的服务与插件", "Installed services and plugins")}
           </p>
         </div>
         {(route.tab === "overview" || route.tab === "network") && (
@@ -228,7 +234,7 @@ function Hub({ route, menu, navigate, scroll, onTitle, onState }: Props) {
         <>
           <section className="nr-connection-card" aria-live="polite">
             <div className="nr-connection-icon">
-              <Icon name="network" size={32} />
+              <Icon name="ethernet" size={24} />
             </div>
             <div>
               <span>{t("网络接口", "Network interfaces")}</span>
@@ -243,7 +249,10 @@ function Hub({ route, menu, navigate, scroll, onTitle, onState }: Props) {
               </h2>
               <p>{data?.board?.model || root.dataset.model || "NRadio"}</p>
             </div>
-            <span className={`nr-status-dot ${up ? "is-online" : ""}`} />
+            <span
+              aria-hidden="true"
+              className={`nr-status-dot ${up ? "is-online" : ""}`}
+            />
           </section>
           {error && (
             <p className="nr-inline-error" role="status">
@@ -282,40 +291,44 @@ function Hub({ route, menu, navigate, scroll, onTitle, onState }: Props) {
           {interfaces.length > 0 && (
             <section className="nr-interface-list">
               <h2>{t("当前连接", "Connections")}</h2>
-              {interfaces.map((item) => (
-                <div key={item.interface}>
-                  <span className="nr-setting-icon">
-                    <Icon
-                      name={
-                        item.interface.startsWith("wwan")
-                          ? "cellular"
-                          : "network"
-                      }
-                    />
-                  </span>
-                  <span>
-                    <strong>{item.interface.toUpperCase()}</strong>
-                    <small>
-                      {item["ipv4-address"]?.[0]?.address ||
-                        (item.up
-                          ? t("接口已连接", "Interface up")
-                          : t("未连接", "Disconnected"))}
-                    </small>
-                  </span>
-                  <span
-                    className={`nr-connection-label ${item.up ? "is-online" : ""}`}
-                  >
-                    {item.up ? t("已连接", "Up") : t("未连接", "Down")}
-                  </span>
-                </div>
-              ))}
+              <div className="nr-interface-rows">
+                {interfaces.map((item) => (
+                  <div key={item.interface}>
+                    <span className="nr-setting-icon">
+                      <Icon
+                        name={
+                          item.interface.startsWith("wwan")
+                            ? "cellular"
+                            : "ethernet"
+                        }
+                      />
+                    </span>
+                    <span>
+                      <strong>{item.interface.toUpperCase()}</strong>
+                      <small>
+                        {item["ipv4-address"]?.[0]?.address ||
+                          t("无 IPv4 地址", "No IPv4 address")}
+                      </small>
+                    </span>
+                    <span
+                      className={`nr-connection-label ${item.up ? "is-online" : ""}`}
+                    >
+                      {item.up ? t("已连接", "Up") : t("未连接", "Down")}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </section>
           )}
         </>
       )}
       {groups.map((group) => (
-        <section className="nr-settings-section" key={group.key}>
-          <h2>{group.title}</h2>
+        <section
+          className="nr-settings-section"
+          key={group.key}
+          aria-label={group.title}
+        >
+          {group.title !== titles[route.tab] && <h2>{group.title}</h2>}
           <div className="nr-setting-list">
             {(group.children.length ? group.children : [group]).map((node) => (
               <a
@@ -333,9 +346,6 @@ function Hub({ route, menu, navigate, scroll, onTitle, onState }: Props) {
                   link(node);
                 }}
               >
-                <span className="nr-setting-icon">
-                  <Icon name={pageTab(node.url)} />
-                </span>
                 <span>
                   <strong>{node.title}</strong>
                   <small>{description(node)}</small>
