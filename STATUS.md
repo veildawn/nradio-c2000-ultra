@@ -14,7 +14,7 @@
 
 | 子系统 | 关键硬件参数与适配实现 | 状态 |
 | --- | --- | --- |
-| SoC / 存储 / 双系统 | `MT7987A`（实机 `1 GiB` DDR4 动态映射（系统可用 `987 MiB`）+ `zram-swap` 实测 `493 MiB ≈ 50%` `lzo-rle` / `swappiness=100`），`mmc0` 4-bit TF 卡 4 分区（GPT，实测 `5G/1M/128M/9.4G`，`PARTLABEL=rootfs`），`spi2` NOR 实测 9 分区：固定 `BL2(256K)` / `u-boot-env(64K)` / `Factory(1M)` / `bdinfo(512K)` / `FIP(1M)` + `firmware(29.2M)` 动态拆分 `kernel(3.4M)` / `rootfs(26.7M)` / `rootfs_data(1.7M)`；`boot_from_sd=1` 时以 `root=PARTLABEL=rootfs` 从 TF 卡挂 squashfs `/rom`，overlay 固定落 NOR `rootfs_data`（mtd8）；`c2000-bootswitch` 自带 mtd1 CRC32 解析一键切换（实测 `boot_from_sd=1 (openwrt-sd)`）。注：旧版镜像 `/etc/fw_env.config` 为空导致标准 `fw_setenv` 不可用，仓库 HEAD 已由 `25-nradio-c2000-ubootenv` 修复 | 已验证 |
+| SoC / 存储 / 双系统 | `MT7987A`（实机 `1 GiB` DDR4 动态映射（系统可用 `987 MiB`）+ `zram-swap` 实测 `493 MiB ≈ 50%` `lzo-rle` / `swappiness=100`），`mmc0` 4-bit TF 卡 4 分区（GPT，实测 `5G/1M/128M/9.4G`，`PARTLABEL=rootfs`），`spi2` NOR 实测 9 分区：固定 `BL2(256K)` / `u-boot-env(64K)` / `Factory(1M)` / `bdinfo(512K)` / `FIP(1M)` + `firmware(29.2M)` 动态拆分 `kernel(3.4M)` / `rootfs(26.7M)` / `rootfs_data(1.7M)`；`boot_from_sd=1` 时以 `root=PARTLABEL=rootfs` 从 TF 卡挂 squashfs `/rom`，旧版 overlay 实测落在 NOR `rootfs_data`（mtd8），新版的 TF 独立配置见下文；`c2000-bootswitch` 自带 mtd1 CRC32 解析一键切换（实测 `boot_from_sd=1 (openwrt-sd)`）。注：旧版镜像 `/etc/fw_env.config` 为空导致标准 `fw_setenv` 不可用，仓库 HEAD 已由 `25-nradio-c2000-ubootenv` 修复 | 已验证 |
 | 双 2.5G 网口 | `LAN = eth1`（片内 2.5G PHY `phy@f` + `mt7987-2p5g-phy-firmware`），`WAN = eth0`（Airoha `EN8811H` `phy@b`，`pio42` 复位 + `airoha-en8811h-firmware`），严格单播 MAC 校验与 `bdinfo` `fac_mac` 派生（净刷实测 `eth1=fac_mac`、`eth0=fac_mac+1` 由 `02_network` 写入 uci；内核早期 `mtk_soc_eth` 随机 MAC 的 kern.err 日志会被 uci macaddr 覆盖，无害） | 已验证 |
 | Wi-Fi 7 (`MT7992`) | 开源 `mt76`（`kmod-mt7996e` + `kmod-mt7992-23-firmware`），`&pcie0` 复位 `pio38`（`100ms`），读取 `Factory` `0x0..0x1e00` 校准数据；默认 `country=CN`（解锁 160MHz/DFS 与完整功率），严格校验单播 MAC 并自动派生 `2.4G (+2)` / `5G (+3)` `macaddr_base`（修复 `00:0c:43:*` 模板 MAC 及 `0b:00:43:*` 组播脏 MAC 导致无法桥接 `br-lan` 的问题）。净刷后射频遵循上游默认策略**禁用**（`radio0/radio1 disabled=1`），需手动启用；启用后单 phy 双频 `phy0.0-ap0`(2.4G)/`phy0.1-ap0`(5G)，实测 MAC 派生正确、iPhone 以 `EHT-MCS11/80MHz/2×2 = 1200 Mbps`（`-39 dBm`）稳定关联 | 已验证 |
 | 5G 蜂窝 (`MT5700M-CN`) | USB `3466:3301`（6.18 主线 `option` + `cdc_ether`/`cdc_ncm`），禁用 USB 自动挂起、`cpe-pwr`（`pio49` 低有效）冷断电自愈、热重启 USB 2.0 → USB 3.0（`5000M`）一次性重训练、NVRAM 异常模式自愈（`AT^SETMODE` 保留原厂双系统 `1` 并修复 `6/7/8`，修复 `AT^TDCFG` E5/IP 直通残留与 `AT^C5GOPTION` 5G SA 锁死）、`ncm.sh` 串口并发避让、三路 SIM 切换（外置 SIM1 / SIM2 / 内置 eSIM）、四大运营商 APN 自动配置、`fw4` WAN 域与单 `/64` IPv6 `odhcpd` `ndp='relay'` 中继 | 端到端已验证（2026-11-14）：eSIM 自动检测（IMSI `460060`（联通）→APN `3gnet`）、`C5GREG: 2,1` + `AcT=11` **NR 5GC 注册成功**、`^HCSQ: "NR"` 实测 RSRP `-83 ~ -89 dBm` / SINR `+13 ~ +27 dB`、`wwan_4` CGNAT `10.x.x.x` + `wwan_6` 全球单栈 `2408:*` 双栈上线、三卡槽 UI 切换与自动探测恢复闭环实测通过 |
@@ -30,7 +30,7 @@
 
 在线更新实测记录（2026-11-14，联通 5G 出口）：`api.github.com` 可达（含 IPv6 AAAA）；`github.com` release 下载域名全系 v4-only 且直连被墙——页面提供可选「下载加速前缀」（如 `https://ghfast.top/`，实测免费通道限速 ~10 KB/s 不可用，其他网络环境/有线 WAN 直连即可）；固件完整性始终以 API digest 校验（实测 ghfast 镜像内容哈希与 API digest 一致）。刷新页面自动恢复已下载就绪态。
 
-**在线升级通道（OpenWrt 自身 sysupgrade）根因修复**：上游 `emmc_do_upgrade` 依赖 `find_mmc_part` 按 uevent `PARTNAME` 解析分区，而 TF 卡 GPT 分区不暴露该属性 → `EMMC_ROOT_DEV` 为空 → **写分区被整体跳过、仅重启**（本机此前全部经原厂 Web 刷入，该路径从未被触发过）。修复为 nradio 专有分支直写 `EMMC_ROOT_DEV=/dev/mmcblk0p4`（`root=PARTLABEL=rootfs` 实际所在，`/proc/self/mountinfo` 179:4 实证），kernel 分区 `mmcblk0p3`（原厂 boot 镜像格式，仅原厂刷机工具会重新打包 FIT）不动——因此**跨内核版本的 Release 会被在线更新页拒绝**（Release 名携带 `Linux <ver>` 与 `uname -r` 比对），需走原厂 Web 刷入。`-n` 不保留配置升级在分支内追加 `mtd erase rootfs_data` 清 NOR overlay（否则旧 `/etc/config` 会存活）。注意：保留配置升级会重建 overlay 且仅恢复 `/etc`——对 overlay 的任何热修改都不会存活，修复必须进固件。首个完整自升级版本 **`v2026.11.14-5-r38246`**（`v3`/`v4` 为 tag 误打在旧 main 的退化构建，已删除）；上游 ImageBuilder 已滚动至 `r38253-e2ed57b957`（内核 vermagic `0011ea4d...` 不变，在线升级兼容）。截至该版本，全部 15 条 PR review 意见（5×P1、10×P2）已修复并实机验证。
+**旧版在线升级通道实测记录（截至 `v2026.11.14-9-r38253`）**：上游 `emmc_do_upgrade` 依赖 `find_mmc_part` 按 uevent `PARTNAME` 解析分区，而 TF 卡 GPT 分区不暴露该属性 → `EMMC_ROOT_DEV` 为空 → **写分区被整体跳过、仅重启**（本机此前全部经原厂 Web 刷入，该路径从未被触发过）。修复为 nradio 专有分支直写 `EMMC_ROOT_DEV=/dev/mmcblk0p4`（`root=PARTLABEL=rootfs` 实际所在，`/proc/self/mountinfo` 179:4 实证），kernel 分区 `mmcblk0p3`（原厂 boot 镜像格式，仅原厂刷机工具会重新打包 FIT）不动——因此**跨内核版本的 Release 会被在线更新页拒绝**（Release 名携带 `Linux <ver>` 与 `uname -r` 比对），需走原厂 Web 刷入。`-n` 不保留配置升级在分支内追加 `mtd erase rootfs_data` 清 NOR overlay（否则旧 `/etc/config` 会存活）。保留配置升级只备份 sysupgrade 选定的配置文件。首个完整自升级版本 **`v2026.11.14-5-r38246`**（`v3`/`v4` 为 tag 误打在旧 main 的退化构建，已删除）；上游 ImageBuilder 已滚动至 `r38253-e2ed57b957`（内核 vermagic `0011ea4d...` 不变，在线升级兼容）。截至该版本，全部 15 条 PR review 意见（5×P1、10×P2）已修复并实机验证。
 
 状态数据链路（注网被拒与 NR 双场景实机验证）：`mt5700-bringup` 每周期在持锁段开头执行一次只读 AT 批量采集（`/etc/gcom/mt5700-status.gcom`）写 `/tmp/mt5700.status.raw`；`mt5700-status` 默认只读 stamp（零 AT 竞争）；仅显式 CLI `mt5700-status --refresh` 在锁空闲且没有拨号任务时直采。一致性语义参考原厂 ROM「按需实时查询」：切卡瞬间删除 stamp、`SLOT_STAMP` 晚于数据即判过渡态、CPIN 空且非过渡判「未检测到 SIM 卡」、stamp 超过 2×巡检间隔数值降级为「—」——UI 永不拿过期数据冒充当前状态。
 
@@ -64,17 +64,17 @@ python3 -m unittest discover -s tests -v
 - **2026-11-14 追加（LuCI 前端联调）**：`luci-app-nradio-c2000` 两个页面上机实测——5G NR 注册恢复（`C5GREG AcT=11`，RSRP `-83 dBm`）、三卡槽 UI 切换闭环（sim1 无卡→如实显示「未检测到 SIM 卡」→切回 auto 自动探测恢复 eSIM 并重新拨号）、双系统切换全链路（写入 `boot_from_sd=0` → 待重启警告 → UI 取消切回 `1`，全程 5G 在线）
 - **遗留排查项**：无上游网络时 sysntpd 不同步、时钟慢约一天（注网上游通了自愈）；root 密码净刷后为空，需第一时间设置
 
+## 双系统配置隔离（待实机验证）
+
+新版设备树把板载原厂镜像分区暴露为只读的 `factory-firmware`，OpenWrt 不再从中拆出 MTD `rootfs_data`。OpenWrt 在现有 TF 卡第 4 分区（`/dev/mmcblk0p4`）的 SquashFS 之后使用独立的 `/overlay`，原厂继续使用其板载配置区。TF 分区表无需调整。正常在线升级和清除配置仅写 TF 卡，保留配置时只迁移 sysupgrade 备份选中的文件。
+
+从旧版 OpenWrt 或 Mwrt 首次切换时，先把需要的配置导出到电脑，再切回原厂，从原厂 Web 的双系统页面向 TF 卡刷入完整镜像，更新 TF 内核和设备树。旧版在线升级只更新根文件系统，若留下旧设备树，新版会进入 failsafe。旧版「清除配置升级」会尝试擦除板载 `rootfs_data`，首次切换时请勿使用。首次启动后按需恢复确认属于 OpenWrt 的设置。恢复旧备份时若出现 LuCI「Theme fallback」，在 OpenWrt 上执行 `sh /rom/etc/uci-defaults/91-nradio-luci-bootstrap`，再刷新页面。
+
+启动后用 `grep ' /overlay ' /proc/self/mountinfo` 确认可写层来自 TF 卡上的 loop 设备，用 `cat /proc/mtd` 确认只暴露 `factory-firmware`，没有板载 `rootfs_data`。实机还需验证两个系统分别修改配置后重启、来回切换，以及新版保留和清除配置升级。
+
 ## 编译与定制打包方式
 
 固件默认使用官方 LuCI 的 Bootstrap 主题。5G 蜂窝、应用管控、双系统切换和在线固件更新仍可从 LuCI 菜单打开。
-
-已启用 Astryx 的设备如果要保留配置升级，请在刷入前用 SSH 切回 Bootstrap，再开始升级：
-
-```sh
-uci set luci.main.mediaurlbase='/luci-static/bootstrap'
-uci -q delete luci.themes.Astryx
-uci commit luci
-```
 
 ### 方式一：官方 ImageBuilder 极速定制打包（推荐，约 30 秒）
 

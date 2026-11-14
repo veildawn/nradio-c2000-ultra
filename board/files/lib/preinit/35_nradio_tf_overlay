@@ -1,0 +1,19 @@
+# The TF kernel's DTB must keep the factory image opaque. An upgrade
+# from an old release may have replaced only the rootfs, leaving an old DTB.
+nradio_tf_overlay_guard() {
+	[ "$(board_name)" = "nradio,c2000-ultra" ] || return 0
+	local tf_dev
+	tf_dev="$(cat /sys/class/block/mmcblk0p4/dev 2>/dev/null)"
+	if [ -n "$tf_dev" ] &&
+		awk -v dev="$tf_dev" '$3 == dev && $5 == "/" && / - squashfs / { found = 1 } END { exit !found }' /proc/self/mountinfo &&
+		grep -q '"factory-firmware"$' /proc/mtd &&
+		! grep -q '"rootfs_data"$' /proc/mtd; then
+		return 0
+	fi
+
+	echo "NRadio: TF overlay isolation unavailable; reinstall the full TF image from the factory Web UI." > /dev/console
+	export FAILSAFE=true
+	touch /tmp/failsafe
+}
+
+boot_hook_add preinit_main nradio_tf_overlay_guard

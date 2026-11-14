@@ -291,7 +291,9 @@
 			};
 
 			partition@2d0000 {
-				label = "firmware";
+				// Keep the vendor image opaque to OpenWrt's MTD splitter.
+				// This leaves the TF rootdisk as fstools' rootfs_data.
+				label = "factory-firmware";
 				reg = <0x2d0000 0x1d30000>;
 				read-only;
 			};
