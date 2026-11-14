@@ -24,7 +24,7 @@
 
 | 页面 | 功能 | 实现要点 |
 | --- | --- | --- |
-| 网络 → **5G 蜂窝** | 模组/SIM 状态（三卡槽、IMSI/ICCID、运营商/注册）、`^HCSQ` 信号解码（NR/LTE/WCDMA/GSM 分制式 RSRP/SINR/RSRQ/EcIo + 信号条）、wwan IPv4/IPv6、模组温度；设置表单（SIM 卡槽 auto/sim1/sim2/esim、APN、USB3 重训练、NVRAM 自愈、高温联动、巡检间隔） | `modem.js` 10 秒轮询 `/usr/sbin/mt5700-status`（JSON）；设置写入 UCI `mt5700`，由守护进程下一周期（≤`check_interval`）应用 |
+| 网络 → **5G 蜂窝**（Tab 化：总览 / 小区与信号 / SIM 与 QoS / 流量统计 / 设置） | 总览：模组/SIM/信号条/双栈/温度/IMEI/连接时长；小区与信号：`^MONSC` 驻留小区（NR SSB 频点/SCS/Cell ID/PCI/TAC + 实值 RSRP/RSRQ/SINR，LTE/WCDMA 同）+ `^HCSQ` 分制式解码；SIM 与 QoS：`^DSAMBR` 签约速率（实测联通 NR 下行 1 Gbps / 上行 200 Mbps + 签约 APN）、`+CGEQOSRDP` QCI/5QI（23.203 特性表）、PDP 双栈地址、已激活承载；流量统计：日/账期/累计持久化账目（`/tmp` 累计 + NOR ≤10min/1MiB 检查点防磨损）、会话级流量（按 wwan_4 uptime 重定基）、实时速率曲线、月度限额（MB）+ 账期重置日（1–31，短月按月末）+ 超限动作（仅提醒/断开蜂窝直至下账期，实机验证自动断开与恢复）；设置：SIM 槽位/APN/网络模式（自动/仅 5G/仅 4G，`^SYSCFGEX` 幂等）/USB3/NVRAM/高温联动/巡检间隔 | `modem.js` 10 秒轮询 `/usr/sbin/mt5700-status`；限额与账期由 UCI `mt5700` 配置、守护进程执行（清零经 UCI marker，保持 status 只读） |
 | 系统 → **双系统切换** | 当前启动目标展示、一键切回原厂固件（确认弹窗 + 待重启警告 + 一键取消切回 + 可选立即重启） | `bootswitch.js` 经 rpcd ACL 受控执行 `c2000-bootswitch`，写入前自动校验 `u-boot-env` CRC32 |
 | 系统 → **在线固件更新** | 检查本仓库 GitHub Release（版本/摘要对比，同源码基线绿色徽章）、下载固件到 `/tmp`（进度条、断点重试、可选下载加速前缀）、SHA-256 校验、「保留配置升级」与「不保留配置升级（推荐）」双模式一键 sysupgrade | `c2000-upgrade`（check/download/status/preflight）：完整性锚点取自 `api.github.com` 资产 `digest` 字段（与下载途径解耦）；后台 `setsid` worker 下载规避 rpcd 超时；升级弹窗内置本机迁移风险提示（原厂/Mwrt 残留配置破坏 SSH/Wi-Fi/拨号的实测教训） |
 
