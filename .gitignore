@@ -13,7 +13,3 @@ build/
 *.pdf
 !firmware/**/*.bin
 !docs/**/*.pdf
-
-# Astryx dependencies and firmware assets built from ui/astryx
-node_modules/
-board/files/www/luci-static/astryx/

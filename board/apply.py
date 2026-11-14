@@ -43,20 +43,31 @@ def main() -> None:
         else Path(__file__).resolve().parent
     )
 
-    for asset in ("astryx.js", "astryx.css", "THIRD-PARTY-NOTICES.txt"):
-        if not (board_dir / "files/www/luci-static/astryx" / asset).is_file():
-            sys.exit("Astryx assets are missing. Run npm --prefix ui/astryx ci && npm --prefix ui/astryx run build first.")
-
     # 1. Copy board DTS
     dts_src = board_dir / "mt7987a-nradio-c2000ultra.dts"
     dts_dst = root / "target/linux/mediatek/dts/mt7987a-nradio-c2000ultra.dts"
     shutil.copyfile(dts_src, dts_dst)
 
-    # 2. Copy board base-files (MT5700M-CN manager, hotplug, gcom, UCI defaults)
-    copy_board_files(
-        board_dir / "files",
-        root / "target/linux/mediatek/filogic/base-files",
-    )
+    # 2. Remove Astryx files left by an earlier board patch before copying base-files.
+    base_files = root / "target/linux/mediatek/filogic/base-files"
+    for relative_path in (
+        "etc/uci-defaults/90-nradio-astryx-ui",
+        "usr/share/luci/menu.d/nradio-astryx.json",
+        "usr/share/ucode/luci/template/nradio/astryx.ut",
+        "www/luci-static/resources/astryx-frame.js",
+        "www/luci-static/resources/menu-astryx.js",
+    ):
+        (base_files / relative_path).unlink(missing_ok=True)
+    for relative_path in (
+        "usr/share/ucode/luci/template/themes/astryx",
+        "www/luci-static/astryx",
+    ):
+        path = base_files / relative_path
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    copy_board_files(board_dir / "files", base_files)
 
     # 3. Register or update Device/nradio_c2000-ultra in filogic.mk
     device_block = """define Device/nradio_c2000-ultra
