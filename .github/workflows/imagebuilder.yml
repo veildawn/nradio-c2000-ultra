@@ -36,13 +36,22 @@ jobs:
       - name: Lint board scripts and Python tooling
         run: |
           python3 -m py_compile board/apply.py board/inject_imagebuilder.py
-          find board/files -type f ! -name '*.gcom' ! -name '*.conf' ! -name '*.json' ! -name '*.js' ! -path '*/etc/config/*' -exec sh -n {} +
+          find board/files -type f ! -name '*.gcom' ! -name '*.conf' ! -name '*.json' ! -name '*.js' ! -path '*/etc/config/*' -print0 | xargs -0 -n 1 sh -n
+          for script in board/files/www/luci-static/resources/view/nradio/*.js; do
+            node --check "$script"
+          done
           python3 - <<'PY'
           import json, pathlib
           for p in sorted(pathlib.Path('board/files').rglob('*.json')):
               json.loads(p.read_text())
               print('json ok:', p)
           PY
+
+      - name: Test updater, modem snapshots and LuCI interactions
+        run: |
+          python3 -m pip install 'playwright>=1.50,<2'
+          python3 -m playwright install --with-deps chromium
+          python3 -m unittest discover -s tests -v
 
       - name: Install host prerequisites
         run: |

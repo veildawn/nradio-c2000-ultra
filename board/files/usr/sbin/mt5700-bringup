@@ -30,6 +30,7 @@ MODEM_USBDEV=""
 MODEM_SPEED=""
 MODEM_AT=""
 MODEM_NET=""
+STATUS_THERMAL=""
 
 log() {
 	logger -t mt5700 "$*"
@@ -314,7 +315,9 @@ check_modem_thermal() {
 	[ "$thermal_guard" = "1" ] || return 0
 	[ -c "$MODEM_AT" ] || return 0
 
-	raw=$(at_cmd "$MODEM_AT" "AT^CHIPTEMP?" | tr '\n' ' ')
+	# Reuse this tick's sweep; only query again if no temperature arrived.
+	raw="$STATUS_THERMAL"
+	[ -n "$raw" ] || raw=$(at_cmd "$MODEM_AT" "AT^CHIPTEMP?" | tr '\n' ' ')
 	vals=$(echo "$raw" | sed -n 's/^.*^CHIPTEMP:[[:space:]]*\([-0-9,[:space:]]*\).*$/\1/p' | tr -d ' ')
 	[ -n "$vals" ] || return 0
 
@@ -537,6 +540,7 @@ wwan_is_pending() {
 # without ever contending for the PCUI port; skipped while ncm.sh is dialing.
 refresh_status_raw() {
 	local out
+	STATUS_THERMAL=""
 	[ -c "$MODEM_AT" ] || return 1
 	wwan_is_pending && return 1
 	# "^" AT commands must ride env vars: gcom script literals eat ^X as control escapes
@@ -545,7 +549,10 @@ refresh_status_raw() {
 		CMD_DSAMBR='AT^DSAMBR=1' \
 		timeout 40 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
 	case "$out" in
-	*OK*) printf '%s\n' "$out" > "$STATUS_RAW_STAMP" ;;
+	*OK*)
+		printf '%s\n' "$out" > "$STATUS_RAW_STAMP.$$" && mv -f "$STATUS_RAW_STAMP.$$" "$STATUS_RAW_STAMP"
+		STATUS_THERMAL=$(printf '%s\n' "$out" | sed -n '/^\^CHIPTEMP:/p' | tail -n 1)
+		;;
 	*) return 1 ;;
 	esac
 }

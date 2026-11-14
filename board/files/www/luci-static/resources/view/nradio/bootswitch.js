@@ -9,6 +9,9 @@ function parseStatus(text) {
 }
 
 return view.extend({
+	handleSave: null,
+	handleSaveApply: null,
+	handleReset: null,
 	load: function() {
 		return fs.exec('/usr/sbin/c2000-bootswitch', [ 'status' ]);
 	},
@@ -31,7 +34,7 @@ return view.extend({
 
 		var rows = E('table', { 'class': 'table' }, [
 			E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left', 'width': '30%' }, '当前启动目标'),
+				E('td', { 'class': 'td left', 'width': '30%' }, '下次重启进入'),
 				E('td', { 'class': 'td left' }, runningOpenwrt
 					? 'OpenWrt（TF 卡，boot_from_sd=1）'
 					: (pendingFactory
@@ -60,6 +63,10 @@ return view.extend({
 				E('b', {}, '重启后将进入原厂系统'), '（OpenWrt 数据保留，可随时再切回）。'
 			]));
 			actions.appendChild(E('button', {
+				'class': 'cbi-button cbi-button-negative',
+				'click': ui.createHandlerFn(this, 'confirmReboot')
+			}, '立即重启进入原厂系统…'));
+			actions.appendChild(E('button', {
 				'class': 'cbi-button cbi-button-positive',
 				'click': ui.createHandlerFn(this, 'handleCancelFactory')
 			}, '取消切换，保持 OpenWrt'));
@@ -68,8 +75,7 @@ return view.extend({
 		container.replaceChildren(
 			E('h2', {}, '双系统切换（OpenWrt ⇄ 原厂固件）'),
 			E('p', {},
-				'C2000 Ultra 的 U-Boot 通过 SPI-NOR u-boot-env 中的 boot_from_sd 选择启动系统。' +
-				'切换前会自动校验环境分区 CRC32，校验失败将拒绝写入。'),
+				'选择下次启动的系统，重启后生效。当前 OpenWrt 会继续运行，重启前可随时取消切换。'),
 			rows,
 			actions
 		);
@@ -101,11 +107,16 @@ return view.extend({
 	},
 
 	doSwitch: function(action) {
+		if (this.switching) return Promise.resolve();
+		this.switching = true;
 		return fs.exec('/usr/sbin/c2000-bootswitch', [ action ]).then(L.bind(function(res) {
 			var out = ((res.stdout || '') + (res.stderr || '')).trim();
 
 			if (res.code === 0) {
 				if (action == 'to-factory') {
+					this.refresh(this.statusContainer).catch(function(e) {
+						ui.addNotification(null, E('p', {}, '启动目标已写入，但读取状态失败：' + e.message), 'warning');
+					});
 					ui.showModal('切换成功', [
 						E('p', {}, out),
 						E('p', {}, '重启后设备将进入原厂固件。是否立即重启？'),
@@ -114,7 +125,7 @@ return view.extend({
 								'class': 'btn',
 								'click': ui.createHandlerFn(this, function() {
 									ui.hideModal();
-									this.refresh(this.statusContainer);
+									return this.refresh(this.statusContainer);
 								})
 							}, '稍后手动重启'), ' ',
 							E('button', {
@@ -126,7 +137,7 @@ return view.extend({
 				}
 				else {
 					ui.hideModal();
-					this.refresh(this.statusContainer);
+					return this.refresh(this.statusContainer);
 				}
 			}
 			else {
@@ -140,17 +151,29 @@ return view.extend({
 		}, this)).catch(function(e) {
 			ui.hideModal();
 			ui.addNotification(null, E('p', {}, '执行失败：%s'.format(e.message)), 'error');
-		});
+		}).finally(L.bind(function() { this.switching = false; }, this));
+	},
+
+	confirmReboot: function() {
+		ui.showModal('重启进入原厂系统', [
+			E('p', {}, '重启会暂时中断网络，之后请使用原厂系统的管理地址登录。'),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, '取消'), ' ',
+				E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'doReboot') }, '确认重启')
+			])
+		]);
 	},
 
 	doReboot: function() {
-		return fs.exec('/sbin/reboot').catch(function() {}).then(function() {
+		return fs.exec('/sbin/reboot').then(function(res) {
+			if (res.code !== 0) throw new Error(res.stderr || '重启命令失败');
 			ui.showModal('正在重启…', [
-				E('p', {}, '设备正在重启并进入原厂固件，约 1 分钟后完成。'),
-				E('p', { 'style': 'color:#666;font-size:small;' },
-					'之后如需回到 OpenWrt，请在原厂系统执行双系统切换，或使用 SSH：c2000-bootswitch to-openwrt && reboot。')
+				E('p', {}, '设备正在进入原厂系统，约需 1 分钟。'),
+				E('p', {}, '请连接原厂系统的网络并使用其管理地址登录。OpenWrt 的设置已保留。')
 			]);
-			window.setTimeout(function() { window.location.reload(true); }, 90000);
+		}).catch(function(e) {
+			ui.hideModal();
+			ui.addNotification(null, E('p', {}, '未能确认重启结果，请检查设备连接：' + e.message), 'error');
 		});
 	},
 

@@ -6,7 +6,7 @@
 #
 # Commands:
 #   check           query latest release + compare with running firmware
-#   download URL SHA_URL   start background download+verify
+#   download URL SHA256 [MIRROR] [TAG]   start background download+verify
 #   status          emit download progress/state as JSON
 #   preflight       verify downloaded image is ready to flash
 
@@ -17,6 +17,9 @@ REPO_API="https://api.github.com/repos/veildawn/nradio-c2000-ultra/releases/late
 STATE="/tmp/c2000-upgrade.state"
 BIN="/tmp/c2000-upgrade-sysupgrade.bin"
 PART="$BIN.part"
+CACHE="/tmp/c2000-upgrade.release"
+LOCK="/tmp/c2000-upgrade.lock"
+umask 077
 
 cur_info() {
 	local b
@@ -28,18 +31,79 @@ cur_info() {
 	json_cleanup
 }
 
+error() {
+	json_init
+	json_add_string error "$1"
+	json_dump
+	return 1
+}
+
 state_set() {
-	# key=value lines, last write wins; callers rewrite the whole file
-	: > "$STATE"
+	# Readers always see a complete snapshot, including during verification.
+	local tmp="$STATE.$$"
+	: > "$tmp" || return 1
 	while [ $# -gt 0 ]; do
-		printf '%s=%s\n' "$1" "$2"
+		printf '%s=%s\n' "$1" "$2" >> "$tmp"
 		shift 2
-	done >> "$STATE"
+	done
+	mv -f "$tmp" "$STATE"
+}
+
+read_state() {
+	st=idle expected= sha= tag= msg= total=0 kernel=
+	[ -f "$STATE" ] || return 0
+	local key value
+	while IFS='=' read -r key value; do
+		case "$key" in
+		state) st="$value" ;; expected) expected="$value" ;;
+		sha256) sha="$value" ;; tag) tag="$value" ;; msg) msg="$value" ;;
+		total) total="$value" ;; kernel) kernel="$value" ;;
+		esac
+	done < "$STATE"
+}
+
+lock_live() {
+	local pid age mtime
+	read -r pid < "$LOCK/pid" 2>/dev/null || pid=""
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+	# Allow the parent/setsid worker handoff to finish before reclaiming.
+	mtime="${1:-}"
+	[ -n "$mtime" ] || mtime=$(date -r "$LOCK/pid" +%s 2>/dev/null || date -r "$LOCK" +%s 2>/dev/null) || return 1
+	age=$(( $(date +%s) - mtime ))
+	[ "$age" -ge 0 ] && [ "$age" -lt 10 ]
+}
+
+acquire_lock() {
+	local mtime
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		lock_live && return 1
+		mtime=$(date -r "$LOCK/pid" +%s 2>/dev/null || date -r "$LOCK" +%s 2>/dev/null)
+		# Serialize recovery too, so concurrent retries cannot remove a new lock.
+		mkdir "$LOCK/recover" 2>/dev/null || return 1
+		if lock_live "$mtime"; then rmdir "$LOCK/recover"; return 1; fi
+		rm -f "$LOCK/pid"
+		rmdir "$LOCK/recover"
+		rmdir "$LOCK" 2>/dev/null || return 1
+		mkdir "$LOCK" 2>/dev/null || return 1
+	fi
+	echo "$$" > "$LOCK/pid"
+}
+
+release_lock() {
+	local pid
+	read -r pid < "$LOCK/pid" 2>/dev/null || return 0
+	[ "$pid" = "$$" ] || return 0
+	rm -f "$LOCK/pid"
+	rmdir "$LOCK" 2>/dev/null
 }
 
 do_check() {
-	local raw tag pub url size sha_url tag_rev same rel_name rel_kver cur_kver kmatch
-	raw=$(timeout 25 uclient-fetch -q -O - "$REPO_API" 2>/dev/null)
+	local raw tag pub url size sha sha_url tag_rev same rel_name rel_kver cur_kver kmatch age
+	if [ "${1:-}" != "force" ] && [ -s "$CACHE" ]; then
+		age=$(( $(date +%s) - $(date -r "$CACHE" +%s) ))
+		if [ "$age" -ge 0 ] && [ "$age" -lt 300 ]; then cat "$CACHE"; return 0; fi
+	fi
+	raw=$(timeout 15 uclient-fetch -q -O - "$REPO_API" 2>/dev/null)
 	case "$raw" in
 	*"tag_name"*) ;;
 	*)
@@ -103,7 +167,7 @@ do_check() {
 	# built on a different kernel must not be flashed online (old kernel +
 	# new modules = broken USB/Wi-Fi). Release names carry "Linux <ver>".
 	rel_kver=$(printf '%s' "$rel_name" | sed -n 's/.*Linux \([0-9][0-9.]*\).*/\1/p')
-	cur_kver=$(uname -r | sed -n 's/^\([0-9][0-9.]*\).*/\1/p')
+	cur_kver=$(uname -r)
 	kmatch=-1
 	if [ -n "$rel_kver" ] && [ -n "$cur_kver" ]; then
 		kmatch=1
@@ -137,145 +201,160 @@ do_check() {
 	json_add_string "current_kernel" "$cur_kver"
 	json_add_string "current_rev" "$CUR_REV"
 	json_add_string "current_date" "$CUR_DATE"
-	json_dump
+	json_dump > "$CACHE.$$" && mv -f "$CACHE.$$" "$CACHE"
+	cat "$CACHE"
 }
 
 do_download() {
-	local url="$1" expected="$2" mirror="${3:-}" tag="${4:-}"
-	[ -n "$url" ] || return 1
-	# Refuse to flash what could not be verified
-	[ -n "$expected" ] || {
-		json_init
-		json_add_string "error" "缺少可信 SHA-256 摘要，拒绝下载"
-		json_dump
-		return 1
-	}
-	# Re-entry guard: a live worker owns the .part/state pair
-	if [ -f "$STATE" ] && grep -q '^state=downloading' "$STATE" && [ -f "$PART" ]; then
-		json_init
-		json_add_string "error" "已有下载正在进行中"
-		json_dump
-		return 1
-	fi
-
-	# github.com release downloads may be unreachable on CN uplinks; an
-	# optional mirror prefix (gh proxy) is honored — integrity still comes
-	# from the api.github.com digest comparison, not the mirror
+	local url="$1" digest="$2" mirror="${3:-}" release_tag="${4:-}" metadata size kver
+	case "$digest" in ''|*[!a-f0-9]*) error "SHA-256 摘要无效"; return 1 ;; esac
+	[ "${#digest}" -eq 64 ] || { error "SHA-256 摘要无效"; return 1; }
 	case "$mirror" in
 	"") ;;
-	*github.com) ;;
-	*)
-		case "$mirror" in
-		*/) url="${mirror}${url}" ;;
-		*)  url="${mirror}/${url}" ;;
-		esac
-		;;
+	https://?*) ;;
+	*) error "下载加速前缀必须以 https:// 开头"; return 1 ;;
 	esac
-
+	# Bind the request to API metadata, never to browser-supplied claims alone.
+	metadata=$(do_check) || { printf '%s\n' "$metadata"; return 1; }
+	json_load "$metadata"
+	json_get_var checked_url url
+	json_get_var checked_sha sha256
+	json_get_var checked_tag tag
+	json_get_var match kernel_match
+	json_get_var kver release_kernel
+	json_get_var size size
+	[ "$match" = "1" ] || { error "无法确认内核版本兼容，请通过原厂 Web 刷入完整固件"; return 1; }
+	[ "$url" = "$checked_url" ] && [ "$digest" = "$checked_sha" ] && [ "$release_tag" = "$checked_tag" ] || {
+		error "Release 已变更，请重新检查后下载"; return 1
+	}
+	case "$release_tag" in *'
+'*) error "Release 标签无效"; return 1 ;; esac
+	acquire_lock || { error "已有下载或升级正在进行中"; return 1; }
+	[ -z "$mirror" ] || url="${mirror%/}/$url"
 	rm -f "$PART" "$BIN"
-	state_set state downloading expected "$expected" tag "$tag" total 0
-
-	# Fully detached worker: survives the rpcd exec call that spawned it.
-	# The done state keeps tag+expected so the UI can detect a staged image
-	# left over from an older release.
-	setsid sh -c '
-		url="$1"; part="$2"; bin="$3"; state="$4"; expected="$5"; tag="$6"
-		echo "state=downloading" > "$state"
-		echo "expected=$expected" >> "$state"
-		echo "tag=$tag" >> "$state"
-		wget -q -T 90 -O "$part" "$url"
-		rc=$?
-		if [ "$rc" != "0" ] || [ ! -s "$part" ]; then
-			echo "state=error" > "$state"
-			echo "msg=下载失败（wget rc=$rc）。github.com 直连不通时，可在下载前填写加速前缀（如 https://ghfast.top/）重试" >> "$state"
-			rm -f "$part"
-			exit 1
-		fi
-		got=$(sha256sum "$part" | cut -d" " -f1)
-		if [ -n "$expected" ] && [ "$got" != "$expected" ]; then
-			echo "state=error" > "$state"
-			echo "msg=SHA-256 校验失败（$got）" >> "$state"
-			rm -f "$part"
-			exit 1
-		fi
-		mv "$part" "$bin"
-		echo "state=done" > "$state"
-		echo "expected=$expected" >> "$state"
-		echo "tag=$tag" >> "$state"
-		echo "sha256=$got" >> "$state"
-	' -- "$url" "$PART" "$BIN" "$STATE" "$expected" "$tag" >/dev/null 2>&1 &
-
+	state_set state downloading expected "$digest" tag "$release_tag" total "$size" kernel "$kver" || {
+		release_lock; error "无法保存下载状态，请检查临时存储空间"; return 1
+	}
+	setsid /bin/sh "$0" _download "$url" "$digest" "$release_tag" "$size" "$kver" </dev/null >/dev/null 2>&1 &
 	json_init
-	json_add_string "started" "1"
+	json_add_boolean started 1
 	json_dump
+}
+
+download_worker() {
+	local url="$1" digest="$2" release_tag="$3" size="$4" kver="$5" got rc
+	echo "$$" > "$LOCK/pid"
+	trap release_lock EXIT
+	trap 'exit 1' INT TERM
+	wget -q -T 90 -O "$PART" "$url"
+	rc=$?
+	if [ "$rc" != 0 ] || [ ! -s "$PART" ]; then
+		state_set state error msg "下载失败（代码 $rc），请检查网络或更换下载加速前缀后重试"
+		rm -f "$PART"
+		return 1
+	fi
+	state_set state verifying expected "$digest" tag "$release_tag" total "$size" kernel "$kver"
+	got=$(sha256sum "$PART" | cut -d' ' -f1)
+	if [ "$got" != "$digest" ]; then
+		state_set state error msg "SHA-256 校验失败，请重新下载"
+		rm -f "$PART"
+		return 1
+	fi
+	mv "$PART" "$BIN" || { state_set state error msg "无法保存固件"; return 1; }
+	state_set state done expected "$digest" sha256 "$got" tag "$release_tag" total "$size" kernel "$kver"
 }
 
 do_status() {
-	local st="" expected="" got_bytes=0 msg="" sha="" tag=""
-	if [ -f "$STATE" ]; then
-		st=$(sed -n 's/^state=//p' "$STATE" | tail -n 1)
-		expected=$(sed -n 's/^expected=//p' "$STATE" | tail -n 1)
-		msg=$(sed -n 's/^msg=//p' "$STATE" | tail -n 1)
-		sha=$(sed -n 's/^sha256=//p' "$STATE" | tail -n 1)
-		tag=$(sed -n 's/^tag=//p' "$STATE" | tail -n 1)
-	fi
-	[ -n "$st" ] || st="idle"
+	local st expected sha tag msg total kernel got_bytes=0
+	read_state
+	case "$st" in
+	downloading|verifying|flashing)
+		if ! lock_live; then st=error; msg="任务已中断，请重新下载后重试"; fi ;;
+	esac
+	# ls reads file metadata; wc -c on BusyBox may scan the entire image.
 	if [ -f "$PART" ]; then
-		got_bytes=$(wc -c < "$PART" | tr -d ' ')
+		got_bytes=$(ls -ln "$PART" | awk '{print $5}')
 	elif [ -f "$BIN" ]; then
-		got_bytes=$(wc -c < "$BIN" | tr -d ' ')
+		got_bytes=$(ls -ln "$BIN" | awk '{print $5}')
 	fi
-
 	json_init
-	json_add_string "state" "$st"
-	json_add_int "bytes" "$got_bytes"
-	json_add_string "expected" "$expected"
-	json_add_string "tag" "$tag"
-	json_add_string "sha256" "$sha"
-	json_add_string "msg" "$msg"
-	json_add_boolean "have_image" $([ -f "$BIN" ] && echo 1 || echo 0)
-	json_add_string "path" "$BIN"
+	json_add_string state "$st"
+	json_add_int bytes "${got_bytes:-0}"
+	json_add_int total "${total:-0}"
+	json_add_string expected "$expected"
+	json_add_string tag "$tag"
+	json_add_string sha256 "$sha"
+	json_add_string kernel "$kernel"
+	json_add_string msg "$msg"
+	json_add_boolean have_image $([ -s "$BIN" ] && echo 1 || echo 0)
 	json_dump
+}
+
+verify_image() {
+	local st expected sha tag msg total kernel got
+	read_state
+	[ "$st" = done ] && [ -s "$BIN" ] || { error "固件尚未就绪，请重新下载"; return 1; }
+	[ -n "$kernel" ] && [ "$kernel" = "$(uname -r)" ] || {
+		error "固件内核与当前系统不兼容，请重新检查版本"; return 1
+	}
+	[ -z "${1:-}" ] || [ "$1" = "$expected" ] || {
+		error "待升级固件已变更，请刷新页面后重试"; return 1
+	}
+	got=$(sha256sum "$BIN" | cut -d' ' -f1)
+	[ -n "$expected" ] && [ "$got" = "$expected" ] || {
+		error "SHA-256 校验失败，请重新下载"; return 1
+	}
+	/sbin/sysupgrade -T "$BIN" >/dev/null 2>&1 || {
+		error "固件未通过设备兼容性检查，请重新下载适用的固件"; return 1
+	}
 }
 
 do_preflight() {
-	local ok=0 msg="" sha="" expected
-	if [ -s "$BIN" ]; then
-		sha=$(sha256sum "$BIN" | cut -d" " -f1)
-		expected=$(sed -n 's/^expected=//p' "$STATE" 2>/dev/null | tail -n 1)
-		if [ -z "$expected" ]; then
-			msg="缺少可信 SHA-256 基准，拒绝升级"
-		elif [ "$sha" != "$expected" ]; then
-			msg="SHA-256 与 Release 不一致，请重新下载"
-		else
-			ok=1
-		fi
-	else
-		msg="尚未下载固件"
-	fi
+	acquire_lock || { error "已有下载或升级正在进行中"; return 1; }
+	trap release_lock EXIT
+	verify_image "$1" || return 1
 	json_init
-	json_add_int "ready" "$ok"
-	json_add_string "sha256" "$sha"
-	json_add_string "msg" "$msg"
+	json_add_int ready 1
 	json_dump
-	[ "$ok" = "1" ]
+}
+
+do_flash() {
+	local mode="$1" digest="$2"
+	case "$mode" in keep|reset) ;; *) error "升级方式无效"; return 1 ;; esac
+	[ -n "$digest" ] || { error "缺少固件摘要，请刷新页面"; return 1; }
+	acquire_lock || { error "已有下载或升级正在进行中"; return 1; }
+	if ! verify_image "$digest"; then release_lock; return 1; fi
+	state_set state flashing || { release_lock; error "无法保存升级状态"; return 1; }
+	setsid /bin/sh "$0" _flash "$mode" </dev/null >/dev/null 2>&1 &
+	json_init
+	json_add_boolean started 1
+	json_dump
+}
+
+flash_worker() {
+	echo "$$" > "$LOCK/pid"
+	trap release_lock EXIT
+	trap 'exit 1' INT TERM
+	# Give rpcd time to deliver the acknowledgement before networking stops.
+	sleep 2
+	if [ "$1" = reset ]; then /sbin/sysupgrade -n "$BIN"; else /sbin/sysupgrade "$BIN"; fi
+	if [ "$?" -ne 0 ]; then
+		state_set state error msg "升级程序执行失败，请查看系统日志后重试"
+		return 1
+	fi
+	# A successful ubus handoff may return before procd stops services.
+	# Keep the image locked until shutdown, or report a stalled reboot later.
+	sleep 300
+	state_set state error msg "升级请求已提交，但未能确认重启，请检查系统日志"
 }
 
 case "${1:-}" in
-check)
-	do_check
-	;;
-download)
-	do_download "${2:-}" "${3:-}" "${4:-}" "${5:-}"
-	;;
-status)
-	do_status
-	;;
-preflight)
-	do_preflight
-	;;
-*)
-	echo "Usage: $0 {check|download <url> <sha256> [mirror-prefix] [tag]|status|preflight}" >&2
-	exit 1
-	;;
+check) do_check "${2:-}" ;;
+download) do_download "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+status) do_status ;;
+preflight) do_preflight "${2:-}" ;;
+flash) do_flash "${2:-}" "${3:-}" ;;
+_download) download_worker "$2" "$3" "$4" "$5" "$6" ;;
+_flash) flash_worker "$2" ;;
+*) echo "Usage: $0 {check [force]|download <url> <sha256> [mirror-prefix] [tag]|status|preflight [sha256]|flash <keep|reset> <sha256>}" >&2; exit 1 ;;
 esac

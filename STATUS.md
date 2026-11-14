@@ -26,15 +26,36 @@
 | --- | --- | --- |
 | 网络 → **5G 蜂窝**（Tab 化：总览 / 小区与信号 / SIM 与 QoS / 流量统计 / 设置） | 总览：模组/SIM/信号条/双栈/温度/IMEI/连接时长；小区与信号：`^MONSC` 驻留小区（NR SSB 频点/SCS/Cell ID/PCI/TAC + 实值 RSRP/RSRQ/SINR，LTE/WCDMA 同）+ `^HCSQ` 分制式解码；SIM 与 QoS：`^DSAMBR` 签约速率（实测联通 NR 下行 1 Gbps / 上行 200 Mbps + 签约 APN）、`+CGEQOSRDP` QCI/5QI（23.203 特性表）、PDP 双栈地址、已激活承载；流量统计：日/账期/累计持久化账目（`/tmp` 累计 + NOR ≤10min/1MiB 检查点防磨损）、会话级流量（按 wwan_4 uptime 重定基）、实时速率曲线、月度限额（MB）+ 账期重置日（1–31，短月按月末）+ 超限动作（仅提醒/断开蜂窝直至下账期，实机验证自动断开与恢复）；设置：SIM 槽位/APN/网络模式（自动/仅 5G/仅 4G，`^SYSCFGEX` 幂等）/USB3/NVRAM/高温联动/巡检间隔 | `modem.js` 10 秒轮询 `/usr/sbin/mt5700-status`；限额与账期由 UCI `mt5700` 配置、守护进程执行（清零经 UCI marker，保持 status 只读） |
 | 系统 → **双系统切换** | 当前启动目标展示、一键切回原厂固件（确认弹窗 + 待重启警告 + 一键取消切回 + 可选立即重启） | `bootswitch.js` 经 rpcd ACL 受控执行 `c2000-bootswitch`，写入前自动校验 `u-boot-env` CRC32 |
-| 系统 → **在线固件更新** | 检查本仓库 GitHub Release（版本/摘要对比，同源码基线绿色徽章）、下载固件到 `/tmp`（进度条、断点重试、可选下载加速前缀）、SHA-256 校验、「保留配置升级」与「不保留配置升级（推荐）」双模式一键 sysupgrade | `c2000-upgrade`（check/download/status/preflight）：完整性锚点取自 `api.github.com` 资产 `digest` 字段（与下载途径解耦）；后台 `setsid` worker 下载规避 rpcd 超时；升级弹窗内置本机迁移风险提示（原厂/Mwrt 残留配置破坏 SSH/Wi-Fi/拨号的实测教训） |
+| 系统 → **在线固件更新** | 检查本仓库 GitHub Release（版本/摘要对比，同源码基线绿色徽章）、下载固件到 `/tmp`（进度条、失败后重新下载、可选下载加速前缀）、SHA-256 校验、「保留配置升级」与「不保留配置升级（推荐）」双模式一键 sysupgrade | `c2000-upgrade`（check/download/status/preflight）：完整性锚点取自 `api.github.com` 资产 `digest` 字段（与下载途径解耦）；后台 `setsid` worker 下载规避 rpcd 超时；升级弹窗内置本机迁移风险提示（原厂/Mwrt 残留配置破坏 SSH/Wi-Fi/拨号的实测教训） |
 
 在线更新实测记录（2026-11-14，联通 5G 出口）：`api.github.com` 可达（含 IPv6 AAAA）；`github.com` release 下载域名全系 v4-only 且直连被墙——页面提供可选「下载加速前缀」（如 `https://ghfast.top/`，实测免费通道限速 ~10 KB/s 不可用，其他网络环境/有线 WAN 直连即可）；固件完整性始终以 API digest 校验（实测 ghfast 镜像内容哈希与 API digest 一致）。刷新页面自动恢复已下载就绪态。
 
 **在线升级通道（OpenWrt 自身 sysupgrade）根因修复**：上游 `emmc_do_upgrade` 依赖 `find_mmc_part` 按 uevent `PARTNAME` 解析分区，而 TF 卡 GPT 分区不暴露该属性 → `EMMC_ROOT_DEV` 为空 → **写分区被整体跳过、仅重启**（本机此前全部经原厂 Web 刷入，该路径从未被触发过）。修复为 nradio 专有分支直写 `EMMC_ROOT_DEV=/dev/mmcblk0p4`（`root=PARTLABEL=rootfs` 实际所在，`/proc/self/mountinfo` 179:4 实证），kernel 分区 `mmcblk0p3`（原厂 boot 镜像格式，仅原厂刷机工具会重新打包 FIT）不动——因此**跨内核版本的 Release 会被在线更新页拒绝**（Release 名携带 `Linux <ver>` 与 `uname -r` 比对），需走原厂 Web 刷入。`-n` 不保留配置升级在分支内追加 `mtd erase rootfs_data` 清 NOR overlay（否则旧 `/etc/config` 会存活）。注意：保留配置升级会重建 overlay 且仅恢复 `/etc`——对 overlay 的任何热修改都不会存活，修复必须进固件。首个完整自升级版本 **`v2026.11.14-5-r38246`**（`v3`/`v4` 为 tag 误打在旧 main 的退化构建，已删除）；上游 ImageBuilder 已滚动至 `r38253-e2ed57b957`（内核 vermagic `0011ea4d...` 不变，在线升级兼容）。截至该版本，全部 15 条 PR review 意见（5×P1、10×P2）已修复并实机验证。
 
-状态数据链路（注网被拒与 NR 双场景实机验证）：`mt5700-bringup` 每周期在持锁段开头执行一次只读 AT 批量采集（`/etc/gcom/mt5700-status.gcom`）写 `/tmp/mt5700.status.raw`；`mt5700-status` 优先读 stamp（零 AT 竞争），stamp 过期（>45s）且锁空闲时机会式直采。一致性语义参考原厂 ROM「按需实时查询」：切卡瞬间删除 stamp、`SLOT_STAMP` 晚于数据即判过渡态、CPIN 空且非过渡判「未检测到 SIM 卡」、stamp 超过 2×巡检间隔数值降级为「—」——UI 永不拿过期数据冒充当前状态。
+状态数据链路（注网被拒与 NR 双场景实机验证）：`mt5700-bringup` 每周期在持锁段开头执行一次只读 AT 批量采集（`/etc/gcom/mt5700-status.gcom`）写 `/tmp/mt5700.status.raw`；`mt5700-status` 默认只读 stamp（零 AT 竞争）；仅显式 CLI `mt5700-status --refresh` 在锁空闲且没有拨号任务时直采。一致性语义参考原厂 ROM「按需实时查询」：切卡瞬间删除 stamp、`SLOT_STAMP` 晚于数据即判过渡态、CPIN 空且非过渡判「未检测到 SIM 卡」、stamp 超过 2×巡检间隔数值降级为「—」——UI 永不拿过期数据冒充当前状态。
 
 MT5700M-CN AT/gcom 实测坑（均已内置规避）：Balong AT 解析器不接受背靠背命令（必须逐条交互采集）；gcom 脚本字面 `send` 中 `^X` 是控制符转义（`^` 命令必须经 `$env()` 传入）；`+CSQ` 在 NR 模式返回空（信号以 `^HCSQ` 为准）；busybox 无 `stat(1)`（用 `date -r` 取 mtime）；`jsonfilter` 布尔输出 `true/false`、带连字符键名需 `@['ipv4-address']` 引号语法；gcom 偶发退出段错误（按输出内容判有效性）。守护进程新增 **mkdir 原子锁防双实例**（实测事故：procd SIGKILL 后 D 状态孤儿与 respawn 新实例竞争 tick 锁）。
+
+## 新增功能效率与交互优化（待新固件实机验证）
+
+此轮修改覆盖蜂窝状态、在线更新和双系统切换，尚未构建或刷入设备；下面是代码行为与模拟回归结果，不替代上方版本的实机记录。
+
+- **蜂窝状态**：Web 轮询不再触发最长 40 秒的串口采集；后台快照通过临时文件加 rename 原子发布。12 组 AT 字段解析管道合并为一次 shell 遍历，wwan 主接口状态只读取一次，温控复用本周期已采集的温度。页面隐藏时暂停查询；请求失败清除旧的连接结论，过期温度不再显示为实时值。
+- **蜂窝设置**：保留总览、小区、SIM/QoS、流量和设置五个页面页签，常用/流量限额/高级选项分栏，增加手动刷新和 APN 字符检查，说明「保存并应用」后的等待过程；关闭蜂窝功能时显示明确的关闭状态。
+- **在线更新**：先显示本地状态，再查询 GitHub；版本信息缓存 5 分钟，手动重新检查强制刷新。页面恢复下载进度、显示校验阶段，进度总大小取自下载任务本身。失败显示原因并允许重试；就绪固件始终显示其实际 Release 标签。
+- **升级一致性**：下载、校验和提交升级共用互斥锁；状态原子更新。后端将 URL/摘要/标签绑定到 GitHub API 元数据，拒绝未知或不一致的内核；升级前以及最终确认时验证摘要、所选固件与 `sysupgrade -T` 兼容性。清除配置时明确提示 LAN 口及 `192.168.1.1`，提交后等待设备重新上线。
+- **双系统切换**：显示「下次重启进入」，待切换状态保留重启和取消入口；去掉无意义的保存栏，重启错误明确反馈。
+
+验证命令：
+
+```bash
+# Python 标准库执行后端回归；浏览器用例需以下可选依赖
+python3 -m pip install 'playwright>=1.50,<2'
+python3 -m playwright install chromium
+python3 -m unittest discover -s tests -v
+```
+
+`tests/` 使用临时目录中的假网络、JSON 接口及 sysupgrade 命令验证下载/校验/互斥与故障恢复；Chromium 用真实页面脚本配合 LuCI RPC/表单替身验证交互。CI 同时运行这些测试、每个 shell 文件的语法检查与 JavaScript 语法检查。仍需在设备上验证三卡槽切换、温控曲线、弱网下载和保留/清除配置的实际升级闭环。
 
 ## 实测记录（2026-11-14，r38246 实机诊断）
 

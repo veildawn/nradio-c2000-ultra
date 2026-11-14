@@ -4,8 +4,8 @@
 #
 # Data sources, in priority order:
 #   1. /tmp/mt5700.status.raw refreshed every mt5700-bringup daemon tick (default)
-#   2. Opportunistic direct AT sweep when the daemon lock is free and the stamp
-#      is stale (covers a stopped/disabled daemon); never blocks >1s on the lock
+#   2. Explicit --refresh for CLI diagnostics only (can take up to 40s).
+#      Web polling only reads snapshots and never takes the AT port.
 #   3. Always fresh regardless of AT state: USB enumeration, netdev carrier,
 #      ubus wwan/wwan_4/wwan_6 status, UCI configuration
 #
@@ -25,7 +25,6 @@ LOCKFILE="/var/lock/mt5700.lock"
 RAW_STAMP="/tmp/mt5700.status.raw"
 SLOT_STAMP="/tmp/mt5700.active_slot"
 TEMP_STAMP="/tmp/mt5700.chip_temp"
-STALE_AFTER=45
 
 MODEM_SPEED=""
 MODEM_NET=""
@@ -53,6 +52,8 @@ stamp_age() {
 	m=$(date -r "$RAW_STAMP" +%s 2>/dev/null | tr -cd '0-9')
 	[ -n "$m" ] || { echo 999999; return; }
 	now=$(date +%s)
+	# A backwards clock correction must not make old data appear fresh.
+	[ "$now" -ge "$m" ] || { echo 999999; return; }
 	echo $((now - m))
 }
 
@@ -72,9 +73,9 @@ wwan_is_pending() {
 	ubus call network.interface.wwan status 2>/dev/null | grep -q '"pending":[[:space:]]*true'
 }
 
-if [ -n "$MODEM_AT" ] && { [ -z "$RAW" ] || [ "$AGE" -gt "$STALE_AFTER" ]; }; then
+if [ "${1:-}" = "--refresh" ] && [ -n "$MODEM_AT" ]; then
 	# Never sweep while netifd's ncm.sh owns the AT port: it does not take
-	# our private lock, and interleaving a 30s sweep with a dial attempt
+	# our private lock, and interleaving a 40s sweep with a dial attempt
 	# can break registration (same guard as refresh_status_raw).
 	if wwan_is_pending; then
 		BUSY=1
@@ -87,7 +88,7 @@ if [ -n "$MODEM_AT" ] && { [ -z "$RAW" ] || [ "$AGE" -gt "$STALE_AFTER" ]; }; th
 			timeout 40 gcom -d "$MODEM_AT" -s /etc/gcom/mt5700-status.gcom 2>/dev/null | tr -d '\r') || true
 		case "$out" in
 		*OK*)
-			printf '%s\n' "$out" > "$RAW_STAMP"
+			printf '%s\n' "$out" > "$RAW_STAMP.$$" && mv -f "$RAW_STAMP.$$" "$RAW_STAMP"
 			RAW="$out"
 			SOURCE="direct"
 			AGE=0
@@ -103,18 +104,34 @@ fi
 
 # ---- parse raw AT burst (last matching line wins; URC noise tolerated) ----
 # Note: TD Tech "^" responses carry a literal caret prefix ('\^HCSQ: ...').
-CFUN=$(printf '%s\n' "$RAW" | sed -n 's/^+CFUN: *\([0-9]*\).*/\1/p' | tail -n 1)
-CPIN=$(printf '%s\n' "$RAW" | sed -n 's/^+CPIN: *//p' | tail -n 1)
-IMSI=$(printf '%s\n' "$RAW" | grep -E '^[0-9]{15}$' | head -n 1)
-ICCID=$(printf '%s\n' "$RAW" | sed -n 's/^\^ICCID: *\([0-9A-Fa-f]*\).*/\1/p' | tail -n 1)
-COPS=$(printf '%s\n' "$RAW" | sed -n 's/^+COPS: *//p' | tail -n 1)
-CSQ=$(printf '%s\n' "$RAW" | sed -n 's/^+CSQ: *\([0-9]*\),*\([0-9]*\).*/\1 \2/p' | tail -n 1)
-HCSQ=$(printf '%s\n' "$RAW" | sed -n 's/^\^HCSQ: *"\([A-Z]*\)".*/\1/p' | tail -n 1)
-HCSQV=$(printf '%s\n' "$RAW" | sed -n 's/^\^HCSQ: *"[A-Z]*",\([0-9,]*\).*/\1/p' | tail -n 1)
-CEREG=$(printf '%s\n' "$RAW" | sed -n 's/^+CEREG: *//p' | tail -n 1)
-C5GREG=$(printf '%s\n' "$RAW" | sed -n 's/^+C5GREG: *//p' | tail -n 1)
-SCICHG=$(printf '%s\n' "$RAW" | sed -n 's/^\^SCICHG: *\([0-9],[0-9]\).*/\1/p' | tail -n 1)
-CHIPTEMP=$(printf '%s\n' "$RAW" | sed -n 's/^\^CHIPTEMP: *//p' | tail -n 1)
+# One shell pass replaces twelve sed/grep/tail pipelines on every UI poll.
+# CIMI comes before GSN: keep the first 15-digit reply as IMSI, not the IMEI.
+CFUN="" CPIN="" IMSI="" ICCID="" COPS="" CSQ="" HCSQ="" HCSQV=""
+CEREG="" C5GREG="" SCICHG="" CHIPTEMP=""
+while IFS= read -r line; do
+	value="${line#*:}"
+	value="${value#"${value%%[![:space:]]*}"}"
+	case "$line" in
+	+CFUN:*) CFUN="$value" ;;
+	+CPIN:*) CPIN="$value" ;;
+	^ICCID:*) ICCID="$value" ;;
+	+COPS:*) COPS="$value" ;;
+	+CSQ:*) CSQ="${value%%,*} ${value#*,}" ;;
+	^HCSQ:*)
+		value="${value#\"}"
+		HCSQ="${value%%\"*}"
+		case "$value" in *,*) HCSQV="${value#*,}" ;; *) HCSQV="" ;; esac
+		;;
+	+CEREG:*) CEREG="$value" ;;
+	+C5GREG:*) C5GREG="$value" ;;
+	^SCICHG:*) SCICHG="$value" ;;
+	^CHIPTEMP:*) CHIPTEMP="$value" ;;
+	*[!0-9]*|"") ;;
+	*) [ -z "$IMSI" ] && [ "${#line}" -eq 15 ] && IMSI="$line" ;;
+	esac
+done <<EOF
+$RAW
+EOF
 
 # Serving-cell info (AT^MONSC): RAT then a RAT-specific field list
 #   NR:   MCC,MNC,ARFCN-NR,SCS,Cell_ID,PCI,TAC,RSRP,RSRQ,SINR
@@ -260,6 +277,7 @@ fi
 TEMP_DC=""
 if [ -n "$CHIPTEMP" ]; then
 	TEMP_DC=$(echo "$CHIPTEMP" | tr ',' '\n' | tr -cd '0-9\n-\n' | awk '
+		NF == 0 { next }
 		{ v = $1 + 0 }
 		v >= -400 && v <= 1250 && (v > m || n == 0) { m = v; n = 1 }
 		END { if (n) print int(m) }')
@@ -318,13 +336,12 @@ CARRIER_LINK=""
 [ -n "$MODEM_NET" ] && CARRIER_LINK=$(cat "/sys/class/net/$MODEM_NET/carrier" 2>/dev/null | tr -d ' \r\n')
 
 # jsonfilter renders JSON booleans as true/false
-wwan_up() { ubus call network.interface.wwan status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null; }
-wwan_pending() { ubus call network.interface.wwan status 2>/dev/null | jsonfilter -e '@.pending' 2>/dev/null; }
+WWAN_STATUS=$(ubus call network.interface.wwan status 2>/dev/null)
 # jsonfilter needs quoted keys for hyphenated JSON members
 WWAN4_IP=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e "@['ipv4-address'][0].address" 2>/dev/null)
 WWAN6_IP=$(ubus call network.interface.wwan_6 status 2>/dev/null | jsonfilter -e "@['ipv6-address'][0].address" 2>/dev/null)
-[ "$(wwan_up)" = "true" ] && WWAN_UP=1 || WWAN_UP=0
-[ "$(wwan_pending)" = "true" ] && WWAN_PENDING=1 || WWAN_PENDING=0
+[ "$(jsonfilter -s "$WWAN_STATUS" -e '@.up' 2>/dev/null)" = "true" ] && WWAN_UP=1 || WWAN_UP=0
+[ "$(jsonfilter -s "$WWAN_STATUS" -e '@.pending' 2>/dev/null)" = "true" ] && WWAN_PENDING=1 || WWAN_PENDING=0
 
 CFG_ENABLED=$(uci -q get mt5700.modem.enabled)
 CFG_SLOT=$(uci -q get mt5700.modem.sim_slot)
