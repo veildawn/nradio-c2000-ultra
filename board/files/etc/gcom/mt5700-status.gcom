@@ -12,45 +12,81 @@ opengt
 # - "^" prefixed TD Tech commands (AT^HCSQ? ...) MUST be passed through
 #   $env(): in gcom script literals "^X" is a control-character escape
 #   (^m = CR, ^H = BS, ...) which corrupts the command. Callers export
-#   CMD_HCSQ / CMD_ICCID / CMD_SCICHG / CMD_CHIPTEMP with the full AT string.
+#   CMD_* variables with the full AT strings.
  send "AT+CFUN?"
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send "AT+CPIN?"
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send "AT+CIMI"
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send $env("CMD_ICCID")
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send "AT+COPS?"
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send $env("CMD_HCSQ")
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send "AT+CEREG?"
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send "AT+C5GREG?"
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send $env("CMD_SCICHG")
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
  print $s
  send $env("CMD_CHIPTEMP")
  send "^m"
- get 0.5 "" $s
+ get 0.6 "" $s
+ print $s
+ send $env("CMD_MONSC")
+ send "^m"
+ get 0.8 "" $s
+ print $s
+ send "AT+CGEQOSRDP"
+ send "^m"
+ get 0.6 "" $s
+ print $s
+ send $env("CMD_DSAMBR")
+ send "^m"
+ get 0.6 "" $s
+ print $s
+ send "AT+CGPADDR"
+ send "^m"
+ get 0.6 "" $s
+ print $s
+ send "AT+GSN"
+ send "^m"
+ get 0.6 "" $s
+ print $s
+ send "AT+CGACT?"
+ send "^m"
+ get 0.8 "" $s
+ print $s
+ send $env("CMD_NDIS")
+ send "^m"
+ get 0.6 "" $s
+ print $s
+ send $env("CMD_CFG")
+ send "^m"
+ get 0.6 "" $s
+ print $s
+ send $env("CMD_NWTIME")
+ send "^m"
+ get 0.6 "" $s
  print $s
  exit 0

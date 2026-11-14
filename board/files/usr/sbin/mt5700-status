@@ -114,6 +114,44 @@ C5GREG=$(printf '%s\n' "$RAW" | sed -n 's/^+C5GREG: *//p' | tail -n 1)
 SCICHG=$(printf '%s\n' "$RAW" | sed -n 's/^\^SCICHG: *\([0-9],[0-9]\).*/\1/p' | tail -n 1)
 CHIPTEMP=$(printf '%s\n' "$RAW" | sed -n 's/^\^CHIPTEMP: *//p' | tail -n 1)
 
+# Serving-cell info (AT^MONSC): RAT then a RAT-specific field list
+#   NR:   MCC,MNC,ARFCN-NR,SCS,Cell_ID,PCI,TAC,RSRP,RSRQ,SINR
+#   LTE:  MCC,MNC,ARFCN,Cell_ID,PCI,TAC,RSRP,RSRQ,RSSI
+#   WCDMA: MCC,MNC,ARFCN,PSC,Cell_ID,LAC,RSCP,RXLEV,EC/N0,DRX,URA
+# Raw fields are passed through; the LuCI view maps them per RAT.
+MONSC=$(printf '%s\n' "$RAW" | sed -n 's/^\^MONSC: *//p' | tail -n 1)
+MONSC_RAT=$(printf '%s' "$MONSC" | cut -d, -f1)
+MONSC_FIELDS=$(printf '%s' "$MONSC" | cut -d, -f2-)
+
+# Negotiated EPS/5G QoS (AT+CGEQOSRDP): "<cid>,<QCI/5QI>[,...]"
+QCI=$(printf '%s\n' "$RAW" | sed -n 's/^+CGEQOSRDP: *[0-9]*,\([0-9]*\).*/\1/p' | tail -n 1)
+
+# Subscribed APN-AMBR (AT^DSAMBR=1): "<cid>,<Dl kbps>,<Ul kbps>[,"<apn>"[,<5qi>]]"
+DSAMBR_DL=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,\([0-9]*\),\([0-9]*\).*/\1/p' | tail -n 1)
+DSAMBR_UL=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,\([0-9]*\),\([0-9]*\).*/\2/p' | tail -n 1)
+DSAMBR_APN=$(printf '%s\n' "$RAW" | sed -n 's/^\^DSAMBR: *[0-9]*,[0-9]*,[0-9]*,"\([^"]*\)".*/\1/p' | tail -n 1)
+
+# PDP addresses (AT+CGPADDR): cid,"v4"[,"v6-IA5"]
+CGPADDR4=$(printf '%s\n' "$RAW" | sed -n 's/^+CGPADDR: *[0-9]*,"\([0-9.]*\)".*/\1/p' | tail -n 1)
+CGPADDR6=$(printf '%s\n' "$RAW" | sed -n 's/^+CGPADDR: *[0-9]*,"[0-9.]*","\([0-9.]*\)".*/\1/p' | tail -n 1)
+
+# IMEI (standalone 15-digit reply to AT+GSN)
+IMEI=$(printf '%s\n' "$RAW" | grep -E '^[0-9]{15}$' | tail -n 1)
+
+# Activated PDP contexts (AT+CGACT: cid,state); busybox has no paste(1)
+CGACT=$(printf '%s\n' "$RAW" | sed -n 's/^+CGACT: *\([0-9]*\),1$/\1/p' | tr '\n' ',' | sed 's/,$//')
+
+# NDIS dual-stack status (AT^NDISSTATQRY)
+NDIS=$(printf '%s\n' "$RAW" | sed -n 's/^\^NDISSTATQRY: *//p' | tail -n 1)
+
+# Current network-mode AcT string (AT^SYSCFGEX)
+SYSCFG=$(printf '%s\n' "$RAW" | sed -n 's/^\^SYSCFGEX: *"\([0-9]*\)".*/\1/p' | tail -n 1)
+
+# Network time / timezone (AT^NWTIME); "90/01/06" is the modem default
+# shown when the network has not delivered time information
+NWTIME=$(printf '%s\n' "$RAW" | sed -n 's/^\^NWTIME: *//p' | tail -n 1)
+case "$NWTIME" in 90/01/06*) NWTIME="" ;; esac
+
 reg_stat() {
 	case "$1" in
 	0) echo "未注册（未搜索）" ;;
@@ -343,6 +381,51 @@ json_add_boolean "up" "$WWAN_UP"
 json_add_boolean "pending" "$WWAN_PENDING"
 json_add_string "ip4" "$WWAN4_IP"
 json_add_string "ip6" "$WWAN6_IP"
+json_close_object
+
+# ---- serving cell / QoS / PDP / identity / traffic ----
+json_add_object "cell"
+json_add_string "rat" "$MONSC_RAT"
+json_add_string "raw" "$MONSC_FIELDS"
+json_close_object
+
+json_add_object "qos"
+json_add_string "qci" "$QCI"
+json_add_string "dl_ambr_kbps" "$DSAMBR_DL"
+json_add_string "ul_ambr_kbps" "$DSAMBR_UL"
+json_add_string "apn" "$DSAMBR_APN"
+json_close_object
+
+json_add_object "pdp"
+json_add_string "addr4" "$CGPADDR4"
+json_add_string "addr6" "$CGPADDR6"
+json_add_string "active_cids" "$CGACT"
+json_add_string "ndis" "$NDIS"
+json_close_object
+
+json_add_string "imei" "$IMEI"
+json_add_string "syscfg" "$SYSCFG"
+json_add_string "nwtime" "$NWTIME"
+
+# traffic accounting: live counters + persisted day/month/total buckets
+TRAFFIC_DB="/etc/mt5700/traffic.db"
+T_LIVE_RX=""; T_LIVE_TX=""; T_UPTIME=""
+[ -n "$MODEM_NET" ] && {
+	T_LIVE_RX=$(cat "/sys/class/net/$MODEM_NET/statistics/rx_bytes" 2>/dev/null | tr -cd '0-9')
+	T_LIVE_TX=$(cat "/sys/class/net/$MODEM_NET/statistics/tx_bytes" 2>/dev/null | tr -cd '0-9')
+}
+T_UPTIME=$(ubus call network.interface.wwan_4 status 2>/dev/null | jsonfilter -e '@.uptime' 2>/dev/null)
+[ -f "$TRAFFIC_DB" ] && eval "$(sed -n 's/^\([a-z_]*\)=\([0-9]*\)$/\1=\2/p' "$TRAFFIC_DB")"
+json_add_object "traffic"
+json_add_string "live_rx" "${T_LIVE_RX:-0}"
+json_add_string "live_tx" "${T_LIVE_TX:-0}"
+json_add_string "uptime" "${T_UPTIME:-0}"
+json_add_int "day_rx" "${day_rx:-0}"
+json_add_int "day_tx" "${day_tx:-0}"
+json_add_int "mon_rx" "${mon_rx:-0}"
+json_add_int "mon_tx" "${mon_tx:-0}"
+json_add_string "tot_rx" "${tot_rx:-0}"
+json_add_string "tot_tx" "${tot_tx:-0}"
 json_close_object
 
 json_add_string "temp_dc" "$TEMP_DC"
