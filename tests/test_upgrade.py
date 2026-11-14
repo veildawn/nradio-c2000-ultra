@@ -256,6 +256,15 @@ fi
                 self.assertEqual(result['kernel_match'], 1)
                 self.assertIn('Faster 5G', result['notes'])
 
+    def test_release_notes_end_on_a_utf8_character_boundary(self):
+        prefix = '更新\n' + 'x' * 1991
+        (self.root / 'release.json').write_text(json.dumps(dict(
+            tag_name=self.tag, name='OpenWrt Snapshot r38246-24c13d794c (Linux 6.18.60)',
+            body=prefix + '固件', assets=[dict(
+                name='openwrt-nradio_c2000-ultra-squashfs-sysupgrade.bin',
+                browser_download_url=self.url, size=1024, digest='sha256:' + self.digest)])))
+        self.assertEqual(self.call('check', 'force')['notes'], prefix)
+
 
 if __name__ == '__main__':
     unittest.main()

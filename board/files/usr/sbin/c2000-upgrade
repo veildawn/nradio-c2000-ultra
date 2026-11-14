@@ -215,7 +215,21 @@ do_check() {
 		esac
 	fi
 	notes_trimmed=""
-	[ -n "$rel_body" ] && notes_trimmed=$(printf '%.2000s' "$rel_body")
+	if [ -n "$rel_body" ]; then
+		# If byte 2001 continues a character, drop that character from the prefix.
+		notes_trimmed=$(printf '%s' "$rel_body" | LC_ALL=C awk '
+			BEGIN { left = 2000 }
+			NR > 1 { printf "\n"; left-- }
+			length($0) > left {
+				while (left > 0 && substr($0, left + 1, 1) ~ /[\200-\277]/)
+					left--
+				printf "%s", substr($0, 1, left)
+				exit
+			}
+			{ printf "%s", $0; left -= length($0) }
+			left == 0 { exit }
+		')
+	fi
 
 	json_init
 	json_add_string "tag" "$tag"

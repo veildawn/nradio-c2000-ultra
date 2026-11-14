@@ -159,19 +159,39 @@ function maskMiddle(s, head, tail) {
 
 function copyButton(rawVal) {
 	if (!rawVal) return '';
+	var timer;
+	var feedback = E('span', { 'role': 'status' });
+	function legacyCopy() {
+		var field = E('textarea', { 'readonly': '', 'style': 'position:fixed;top:0;opacity:0;' });
+		field.value = rawVal;
+		document.body.appendChild(field);
+		field.select();
+		try {
+			return document.execCommand('copy');
+		} finally {
+			field.remove();
+			btn.focus();
+		}
+	}
 	var btn = E('button', {
 		'type': 'button',
 		'class': 'nr-md-linkbtn',
-		'click': function() {
-			if (navigator.clipboard && navigator.clipboard.writeText) {
-				navigator.clipboard.writeText(rawVal).then(function() {
-					btn.textContent = '已复制 ✓';
-					window.setTimeout(function() { btn.textContent = '复制'; }, 1500);
-				}).catch(function() {});
-			}
+		'click': async function() {
+			var copied = false;
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					await navigator.clipboard.writeText(rawVal);
+					copied = true;
+				} else {
+					copied = legacyCopy();
+				}
+			} catch (e) {}
+			feedback.textContent = copied ? '已复制' : '复制失败';
+			window.clearTimeout(timer);
+			timer = window.setTimeout(function() { feedback.textContent = ''; }, 1500);
 		}
 	}, '复制');
-	return btn;
+	return E('span', {}, [btn, feedback]);
 }
 
 function fmtDbm(v) {

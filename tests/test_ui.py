@@ -233,6 +233,16 @@ class UITests(unittest.TestCase):
         self.page.get_by_role('button', name='显示完整标识').click()
         self.assertIn('460010928378821', self.page.locator('#mt5700_imsi').inner_text())
         self.assertIn('864920061940318', self.page.locator('#mt5700_imei').inner_text())
+        self.page.evaluate("""() => {
+            Object.defineProperty(navigator, 'clipboard', {value: undefined});
+            document.execCommand = command => {
+                window.copied = document.activeElement.value;
+                return command === 'copy';
+            };
+        }""")
+        self.page.locator('#mt5700_imsi').get_by_role('button', name='复制', exact=True).click()
+        self.assertEqual(self.page.evaluate('window.copied'), '460010928378821')
+        self.assertIn('已复制', self.page.locator('#mt5700_imsi').get_by_role('status').inner_text())
         self.page.get_by_role('button', name='隐藏敏感标识').click()
         self.assertNotIn('460010928378821', self.page.locator('#mt5700_imsi').inner_text())
 
