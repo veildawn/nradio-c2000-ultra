@@ -4,7 +4,7 @@
 
 为鲲鹏 **NRadio C2000 Ultra**（MediaTek `MT7987A` + `MT7992` BE5040 Wi-Fi 7 + 海思/鼎桥 `MT5700M-CN` 5G）构建基于**社区官方开源标准**的可直刷 `sysupgrade` 固件：
 
-- **上游基线**：官方 OpenWrt `main` Snapshot（`r38240-b0f96dc621`，Linux `6.18.60`），严格不使用 `chasey-dev` 分支或闭源 `mt_wifi7` 驱动
+- **上游基线**：官方 OpenWrt `main` Snapshot（`r38246-24c13d794c`，Linux `6.18.60`），严格不使用 `chasey-dev` 分支或闭源 `mt_wifi7` 驱动
 - **在线软件源兼容**：内核 `vermagic`（`0011ea4d08f27770cb30251cb10b1094`）与 `downloads.openwrt.org` 官方 `mediatek/filogic` Snapshot 完全一致，刷入后可直接 `apk update && apk add` 安装官方仓库全部 `kmod-*` 与软件包
 - **刷机兼容**：未签名 `ustar` 格式 `sysupgrade-tar | append-metadata`（`compat_version = 1.0`），FIT 加载/入口地址 `0x40080000`，`SUPPORTED_DEVICES` 同时包含 `nradio,c2000-ultra`、`NRadio-C2000MAX-798`、`NRadio-C2000MAX-Ultra`、`NRadio-C2000Ultra`，兼容原厂双系统 Web UI（`sysupgrade-opensource`）与三方 `Mwrt` `sysupgrade`
 
@@ -12,11 +12,11 @@
 
 | 子系统 | 关键硬件参数与适配实现 | 状态 |
 | --- | --- | --- |
-| SoC / 存储 | `MT7987A`（256 MiB RAM @ `0x40000000`），`mmc0` 4-bit TF 卡（`PARTLABEL=rootfs`），`spi2` NOR 6 分区（`BL2` / `u-boot-env` / `Factory` / `bdinfo` / `FIP` / `firmware`） | 已验证 |
-| 双 2.5G 网口 | `LAN = eth1`（片内 2.5G PHY `phy@f` + `mt7987-2p5g-phy-firmware`），`WAN = eth0`（Airoha `EN8811H` `phy@b`，`pio42` 复位 + `airoha-en8811h-firmware`） | 已验证 |
-| Wi-Fi 7 (`MT7992`) | 开源 `mt76`（`kmod-mt7996e` + `kmod-mt7992-23-firmware`），`&pcie0` 复位 `pio38`（`100ms`），读取 `Factory` `0x0..0x1e00` 校准数据；针对 `MT7992` 单 wiphy MLD 架构自动由 `bdinfo` `fac_mac` 派生 `2.4G (+2)` / `5G (+3)` `macaddr_base`，覆盖 `Factory` 模板 MAC（`00:0c:43:*`） | 已验证 |
-| 5G 蜂窝 (`MT5700M-CN`) | USB `3466:3301`（6.18 主线 `option` + `cdc_ether`/`cdc_ncm`），`cpe-pwr`（`pio49` 低有效）供电守护、热重启 USB 2.0 → USB 3.0（`5000M`）一次性 `AT+CFUN=1,1` 重训练、`cpe-sel0`（`pio48`）+ `AT^SCICHG` 三路 SIM 切换（外置 SIM1 / SIM2 / 内置 eSIM）、四大运营商 IMSI 自动配 APN、`ncm.json` 5G NR 模式与 `AT^NDISDUP` 拨号修复、`fw4` `wwan`/`wwan_4`/`wwan_6` WAN 防火墙域绑定 | 已验证 |
-| 散热与指示灯 | `reg_fan`（`pio5` 低有效供电开关）+ `&pwm 1` 温控风扇（`45 / 65 / 80 °C`），前面板状态灯 / 5G 灯（`blue:indicator-0`）/ 4G 灯（`blue:indicator-1`）/ 氛围灯（`&pwm 0`）无命名冲突 | 已验证 |
+| SoC / 存储 / 双系统 | `MT7987A`（`512 MiB` DDR4 动态映射 + `zram-swap` `50%` 自适应 `lzo-rle` / `swappiness=100`），`mmc0` 4-bit TF 卡（`PARTLABEL=rootfs`），`spi2` NOR 6 分区（`BL2` / `u-boot-env` / `Factory` / `bdinfo` / `FIP` / `firmware`），`uboot-envtools` 严格 CRC32 校验探测 + `c2000-bootswitch` 一键安全切换原厂/OpenWrt 双系统 | 已验证 |
+| 双 2.5G 网口 | `LAN = eth1`（片内 2.5G PHY `phy@f` + `mt7987-2p5g-phy-firmware`），`WAN = eth0`（Airoha `EN8811H` `phy@b`，`pio42` 复位 + `airoha-en8811h-firmware`），严格单播 MAC 校验与 `bdinfo` `fac_mac` 派生 | 已验证 |
+| Wi-Fi 7 (`MT7992`) | 开源 `mt76`（`kmod-mt7996e` + `kmod-mt7992-23-firmware`），`&pcie0` 复位 `pio38`（`100ms`），读取 `Factory` `0x0..0x1e00` 校准数据；默认 `country=CN`（解锁 160MHz/DFS 与完整功率），严格校验单播 MAC 并自动派生 `2.4G (+2)` / `5G (+3)` `macaddr_base`（修复 `00:0c:43:*` 模板 MAC 及 `0b:00:43:*` 组播脏 MAC 导致无法桥接 `br-lan` 的问题） | 已验证 |
+| 5G 蜂窝 (`MT5700M-CN`) | USB `3466:3301`（6.18 主线 `option` + `cdc_ether`/`cdc_ncm`），禁用 USB 自动挂起、`cpe-pwr`（`pio49` 低有效）冷断电自愈、热重启 USB 2.0 → USB 3.0（`5000M`）一次性重训练、NVRAM 异常模式自愈（`AT^SETMODE` 保留原厂双系统 `1` 并修复 `6/7/8`，修复 `AT^TDCFG` E5/IP 直通残留与 `AT^C5GOPTION` 5G SA 锁死）、`ncm.sh` 串口并发避让、三路 SIM 切换（外置 SIM1 / SIM2 / 内置 eSIM）、四大运营商 APN 自动配置、`fw4` WAN 域与单 `/64` IPv6 `odhcpd` `ndp='relay'` 中继 | 已验证 |
+| 散热与指示灯 | `reg_fan`（`pio5` 低有效供电开关）+ `&pwm 1` 静音温控曲线（`65 / 75 / 85 °C` 对应 `31% / 59% / 100%`，`<65 °C` 停转）+ `AT^CHIPTEMP?` 5G 模组高温联动提速（`>=72 °C`），前面板状态灯 / 5G 灯（`blue:indicator-0`）/ 4G 灯（`blue:indicator-1`）/ 氛围灯（`&pwm 0`） | 已验证 |
 
 ## 编译与定制打包方式
 

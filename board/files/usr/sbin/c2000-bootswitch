@@ -1,0 +1,99 @@
+#!/bin/sh
+# Safe Dual-OS boot target switcher for NRadio C2000 Ultra.
+# U-Boot reads `boot_from_sd` from SPI-NOR "u-boot-env":
+#   boot_from_sd=1 -> boot OpenWrt from TF card (GPT kernel/rootfs)
+#   boot_from_sd=0 -> boot Factory ROM from onboard flash
+# Refuses to write unless SPI-NOR u-boot-env passes CRC32 & key sanity checks.
+
+set -u
+
+ENVCFG="/etc/fw_env.config"
+PARTNAME="u-boot-env"
+VAR="boot_from_sd"
+MTD=""
+
+try_env() {
+	local cfg="$1" out
+	out=$(fw_printenv -c "$cfg" 2>&1) || return 1
+	case "$out" in
+	*"Bad CRC"*|*"bad CRC"*|*"Cannot"*) return 1 ;;
+	esac
+	printf '%s\n' "$out" | grep -qE '^(boot_from_sd|boot_system|bootdelay|baudrate|bootcmd)=' || return 1
+	[ "$(printf '%s\n' "$out" | wc -l)" -ge 5 ] || return 1
+	return 0
+}
+
+ensure_envcfg() {
+	local psz ersz sz tmpcfg
+	[ -r /proc/mtd ] || { echo "ERROR: /proc/mtd not readable" >&2; return 1; }
+	MTD=$(awk -F'[:"]' -v n="$PARTNAME" '$3 == n { print $1; exit }' /proc/mtd 2>/dev/null)
+	[ -n "$MTD" ] && [ -c "/dev/$MTD" ] || { echo "ERROR: SPI-NOR partition '$PARTNAME' not found" >&2; return 1; }
+
+	if [ -f "$ENVCFG" ]; then
+		if try_env "$ENVCFG"; then
+			return 0
+		fi
+		echo "ERROR: existing $ENVCFG failed CRC/sanity verification; refusing to write" >&2
+		return 1
+	fi
+
+	set -- $(awk -F'[ :]+' -v n="$PARTNAME" 'index($0, "\"" n "\"") { print $2, $3; exit }' /proc/mtd 2>/dev/null)
+	psz="${1:-}"; ersz="${2:-}"
+	[ -n "$psz" ] && [ -n "$ersz" ] || { echo "ERROR: unable to determine $PARTNAME geometry" >&2; return 1; }
+
+	tmpcfg="/tmp/fw_env.config.$$"
+	for sz in "0x$psz" 0x10000 0x8000 0x4000 0x2000 0x1000; do
+		printf '/dev/%s 0x0 %s 0x%s\n' "$MTD" "$sz" "$ersz" > "$tmpcfg"
+		if try_env "$tmpcfg"; then
+			mv -f "$tmpcfg" "$ENVCFG"
+			return 0
+		fi
+	done
+	rm -f "$tmpcfg"
+	echo "ERROR: could not validate CRC32 on /dev/$MTD across standard env sizes" >&2
+	return 1
+}
+
+switch_target() {
+	local want="$1" label="$2" cur got
+	ensure_envcfg || return 1
+	cur=$(fw_printenv -n "$VAR" 2>/dev/null || true)
+	if [ "$cur" = "$want" ]; then
+		echo "$VAR is already $want ($label)."
+		return 0
+	fi
+	if ! fw_setenv "$VAR" "$want"; then
+		echo "ERROR: fw_setenv failed; boot target unchanged." >&2
+		return 1
+	fi
+	got=$(fw_printenv -n "$VAR" 2>/dev/null || true)
+	if [ "$got" != "$want" ]; then
+		echo "ERROR: read-back mismatch (got '$got', expected '$want')." >&2
+		return 1
+	fi
+	echo "Updated $VAR=$want ($label). Run 'reboot' to boot into $label."
+	return 0
+}
+
+case "${1:-status}" in
+status|check)
+	ensure_envcfg || exit 1
+	cur=$(fw_printenv -n "$VAR" 2>/dev/null || true)
+	case "$cur" in
+	1) desc="openwrt-sd" ;;
+	0) desc="factory-flash" ;;
+	*) desc="unknown" ;;
+	esac
+	echo "mtd=/dev/$MTD ${VAR}=${cur:-unset} (${desc})"
+	;;
+to-factory|to-official)
+	switch_target 0 "Factory ROM (onboard flash)"
+	;;
+to-openwrt|to-sd)
+	switch_target 1 "OpenWrt (TF card)"
+	;;
+*)
+	echo "Usage: $0 {status|check|to-factory|to-openwrt}" >&2
+	exit 1
+	;;
+esac

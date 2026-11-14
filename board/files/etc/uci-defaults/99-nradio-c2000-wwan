@@ -2,6 +2,7 @@
 . /lib/functions.sh
 [ "$(board_name)" = "nradio,c2000-ultra" ] || exit 0
 
+# 1. Configure 5G NCM wwan interface
 if ! uci -q get network.wwan >/dev/null; then
 	uci set network.wwan=interface
 	uci set network.wwan.proto='ncm'
@@ -15,9 +16,10 @@ else
 	[ "$(uci -q get network.wwan.apn)" = "auto" ] && uci -q delete network.wwan.apn
 	[ "$(uci -q get network.wwan.mode)" = "auto" ] && uci -q delete network.wwan.mode
 fi
+uci commit network
 
-# Ensure wwan and dynamic NCM DHCPv4/DHCPv6 sub-interfaces (wwan_4, wwan_6)
-# are attached to the WAN firewall zone under firewall4 (fw4)
+# 2. Attach wwan and dynamic NCM DHCPv4/DHCPv6 sub-interfaces (wwan_4, wwan_6)
+#    to the WAN firewall zone under firewall4 (fw4)
 i=0
 while uci -q get firewall.@zone[$i] >/dev/null; do
 	if [ "$(uci -q get firewall.@zone[$i].name)" = "wan" ]; then
@@ -32,10 +34,46 @@ while uci -q get firewall.@zone[$i] >/dev/null; do
 	fi
 	i=$((i + 1))
 done
-
-uci commit network
 uci commit firewall
 
+# 3. Configure odhcpd hybrid RA/DHCPv6 + NDP proxy relay so single-/64 5G cellular
+#    prefixes (RFC 7278 extendprefix=1 over USB NCM L2 Ethernet) and wired WAN6 PD
+#    both provide working end-to-end IPv6 to LAN clients out of the box.
+if uci -q get dhcp.lan >/dev/null; then
+	uci set dhcp.lan.ra='hybrid'
+	uci set dhcp.lan.dhcpv6='hybrid'
+	uci set dhcp.lan.ndp='relay'
+	uci set dhcp.lan.ra_default='1'
+fi
+for up in wwan_6 wan6; do
+	if ! uci -q get "dhcp.$up" >/dev/null; then
+		uci set "dhcp.$up=dhcp"
+		uci set "dhcp.$up.interface=$up"
+		uci set "dhcp.$up.ignore=1"
+	fi
+	uci set "dhcp.$up.master=1"
+	uci set "dhcp.$up.ra=hybrid"
+	uci set "dhcp.$up.dhcpv6=hybrid"
+	uci set "dhcp.$up.ndp=relay"
+done
+uci commit dhcp
+
+# 4. Tune zram-swap (lzo-rle has minimal per-CPU workspace overhead; leaving
+#    zram_size_mb unset lets /etc/init.d/zram auto-size to 50% of MemTotal,
+#    i.e. ~256 MiB on C2000 Ultra's 512 MiB DDR4).
+if uci -q get system.@system[0] >/dev/null; then
+	[ -n "$(uci -q get system.@system[0].zram_comp_algo)" ] || \
+		uci set system.@system[0].zram_comp_algo='lzo-rle'
+	[ -n "$(uci -q get system.@system[0].zram_priority)" ] || \
+		uci set system.@system[0].zram_priority='100'
+	uci commit system
+fi
+
+# 5. Populate default wireless config (if radios are already probed), country=CN,
+#    and unicast per-radio macaddr_base.
+if ! { [ -e /etc/config/wireless ] && uci -q show wireless | grep -q '=wifi-device$'; }; then
+	[ -x /sbin/wifi ] && /sbin/wifi config >/dev/null 2>&1 || true
+fi
 [ -f /etc/hotplug.d/ieee80211/15-nradio-c2000-wifi-mac ] && \
 	ACTION=add /bin/sh /etc/hotplug.d/ieee80211/15-nradio-c2000-wifi-mac
 

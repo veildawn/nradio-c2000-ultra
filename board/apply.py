@@ -68,7 +68,7 @@ def main() -> None:
 \tkmod-phy-airoha-en8811h airoha-en8811h-firmware \\
 \tmt7987-2p5g-phy-firmware kmod-hwmon-pwmfan \\
 \tkmod-mt7996e kmod-mt7992-23-firmware kmod-mt7992-firmware \\
-\te2fsprogs f2fsck mkf2fs kmod-fs-f2fs
+\te2fsprogs f2fsck mkf2fs kmod-fs-f2fs uboot-envtools zram-swap
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += nradio_c2000-ultra
@@ -89,7 +89,7 @@ TARGET_DEVICES += nradio_c2000-ultra
         mk_text = mk_text.replace(anchor, device_block + anchor, 1)
     mk_path.write_text(mk_text)
 
-    # 4. Update 02_network (LAN=eth1 internal 2.5G, WAN=eth0 EN8811H, bdinfo/Factory/CID MACs)
+    # 4. Update 02_network (LAN=eth1 internal 2.5G, WAN=eth0 EN8811H, strict unicast MACs)
     net_path = root / "target/linux/mediatek/filogic/base-files/etc/board.d/02_network"
     net_text = net_path.read_text()
 
@@ -105,14 +105,9 @@ TARGET_DEVICES += nradio_c2000-ultra
 
     mac_block = (
         "\tnradio,c2000-ultra)\n"
-        '\t\tlan_mac=$(mtd_get_mac_ascii bdinfo "fac_mac")\n'
-        '\t\t[ -n "$lan_mac" ] || lan_mac=$(mtd_get_mac_binary Factory 0xffff4)\n'
-        '\t\tcase "$lan_mac" in\n'
-        '\t\t""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)\n'
-        "\t\t\tlan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)\n"
-        "\t\t\t;;\n"
-        "\t\tesac\n"
-        '\t\twan_mac=$(macaddr_add "$lan_mac" 1)\n'
+        "\t\t. /lib/functions/nradio-c2000.sh\n"
+        "\t\tlan_mac=$(c2000_get_base_mac)\n"
+        '\t\t[ -n "$lan_mac" ] && wan_mac=$(macaddr_add "$lan_mac" 1)\n'
         "\t\tlabel_mac=$lan_mac\n"
         "\t\t;;\n"
     )
@@ -129,7 +124,7 @@ TARGET_DEVICES += nradio_c2000-ultra
         net_text = net_text.replace(mac_anchor, mac_block + mac_anchor, 1)
     net_path.write_text(net_text)
 
-    # 4b. Update 11_fix_wifi_mac (override MediaTek 00:0c:43:* Factory template MACs using bdinfo fac_mac)
+    # 4b. Update 11_fix_wifi_mac (override template 00:0c:43:* & multicast EEPROM MACs)
     wifi_mac_path = (
         root
         / "target/linux/mediatek/filogic/base-files/etc/hotplug.d/ieee80211/11_fix_wifi_mac"
@@ -137,20 +132,15 @@ TARGET_DEVICES += nradio_c2000-ultra
     wifi_mac_text = wifi_mac_path.read_text()
     wifi_mac_block = (
         "\tnradio,c2000-ultra)\n"
+        "\t\t. /lib/functions/nradio-c2000.sh\n"
         '\t\tcur_mac=$(cat /sys${DEVPATH}/macaddress 2>/dev/null)\n'
-        '\t\tcase "$cur_mac" in\n'
-        '\t\t""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)\n'
-        '\t\t\tbase_mac=$(mtd_get_mac_ascii bdinfo "fac_mac")\n'
-        '\t\t\t[ -n "$base_mac" ] || base_mac=$(mtd_get_mac_binary Factory 0xffff4)\n'
-        '\t\t\tcase "$base_mac" in\n'
-        '\t\t\t""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)\n'
-        "\t\t\t\tbase_mac=$(macaddr_generate_from_mmc_cid mmcblk0)\n"
-        "\t\t\t\t;;\n"
-        "\t\t\tesac\n"
-        '\t\t\t[ "$PHYNBR" = "0" ] && macaddr_add "$base_mac" 2 > /sys${DEVPATH}/macaddress\n'
-        '\t\t\t[ "$PHYNBR" = "1" ] && macaddr_add "$base_mac" 3 > /sys${DEVPATH}/macaddress\n'
-        "\t\t\t;;\n"
-        "\t\tesac\n"
+        '\t\tif ! c2000_mac_is_valid_unicast "$cur_mac"; then\n'
+        "\t\t\tbase_mac=$(c2000_get_base_mac)\n"
+        '\t\t\tif [ -n "$base_mac" ]; then\n'
+        '\t\t\t\t[ "$PHYNBR" = "0" ] && macaddr_add "$base_mac" 2 > /sys${DEVPATH}/macaddress\n'
+        '\t\t\t\t[ "$PHYNBR" = "1" ] && macaddr_add "$base_mac" 3 > /sys${DEVPATH}/macaddress\n'
+        "\t\t\tfi\n"
+        "\t\tfi\n"
         "\t\t;;\n"
     )
     existing_wifi_re = re.compile(
@@ -167,6 +157,18 @@ TARGET_DEVICES += nradio_c2000-ultra
             wifi_anchor, wifi_mac_block + wifi_anchor, 1
         )
     wifi_mac_path.write_text(wifi_mac_text)
+
+    # 4c. Register nradio,c2000-ultra in uboot-envtools mediatek_filogic if present
+    ubenv_path = root / "package/boot/uboot-envtools/files/mediatek_filogic"
+    if ubenv_path.is_file():
+        ubenv_text = ubenv_path.read_text()
+        if "nradio,c2000-ultra" not in ubenv_text and "teltonika,rutc50|\\\n" in ubenv_text:
+            ubenv_text = ubenv_text.replace(
+                "teltonika,rutc50|\\\n",
+                "nradio,c2000-ultra|\\\nteltonika,rutc50|\\\n",
+                1,
+            )
+            ubenv_path.write_text(ubenv_text)
 
     # 5. Update platform.sh (GPT kernel/rootfs emmc upgrade + ustar check + copy_config)
     plat_path = root / "target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"

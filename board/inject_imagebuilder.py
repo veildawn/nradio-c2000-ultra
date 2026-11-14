@@ -37,6 +37,8 @@ DEVICE_PACKAGES = [
     "f2fsck",
     "mkf2fs",
     "kmod-fs-f2fs",
+    "uboot-envtools",
+    "zram-swap",
 ]
 
 EXEC_DIRS = {"init.d", "uci-defaults", "sbin", "bin"}
@@ -208,25 +210,31 @@ def main() -> None:
         mk_text = mk_text.replace(anchor, device_block + anchor, 1)
     mk_path.write_text(mk_text)
 
-    # 3. Register Target-Profile in .targetinfo
+    # 3. Register or update Target-Profile in .targetinfo
     ti_path = ib / ".targetinfo"
     ti_text = ti_path.read_text()
-    if "Target-Profile: DEVICE_nradio_c2000-ultra" not in ti_text:
-        ti_entry = (
-            "Target-Profile: DEVICE_nradio_c2000-ultra\n"
-            "Target-Profile-Name: NRadio C2000 Ultra\n"
-            f"Target-Profile-Packages: {' '.join(DEVICE_PACKAGES)}\n"
-            "Target-Profile-hasImageMetadata: 1\n"
-            "Target-Profile-SupportedDevices: nradio,c2000-ultra NRadio-C2000MAX-798 NRadio-C2000MAX-Ultra NRadio-C2000Ultra\n\n"
-            "Target-Profile-Description:\n"
-            "Build firmware images for NRadio C2000 Ultra\n\n"
-            "@@\n\n"
-        )
+    ti_entry = (
+        "Target-Profile: DEVICE_nradio_c2000-ultra\n"
+        "Target-Profile-Name: NRadio C2000 Ultra\n"
+        f"Target-Profile-Packages: {' '.join(DEVICE_PACKAGES)}\n"
+        "Target-Profile-hasImageMetadata: 1\n"
+        "Target-Profile-SupportedDevices: nradio,c2000-ultra NRadio-C2000MAX-798 NRadio-C2000MAX-Ultra NRadio-C2000Ultra\n\n"
+        "Target-Profile-Description:\n"
+        "Build firmware images for NRadio C2000 Ultra\n\n"
+        "@@\n\n"
+    )
+    existing_ti_re = re.compile(
+        r"Target-Profile: DEVICE_nradio_c2000-ultra\n.*?@@\n\n",
+        re.S,
+    )
+    if existing_ti_re.search(ti_text):
+        ti_text = existing_ti_re.sub(ti_entry, ti_text, count=1)
+    else:
         ti_anchor = "Target-Profile: DEVICE_nradio_c8-668gl"
         if ti_anchor not in ti_text:
             sys.exit("ERROR: anchor missing in .targetinfo")
         ti_text = ti_text.replace(ti_anchor, ti_entry + ti_anchor, 1)
-        ti_path.write_text(ti_text)
+    ti_path.write_text(ti_text)
 
     # 4. Ensure unsigned sysupgrade image for Factory Dual-OS & Mwrt compatibility
     cfg_path = ib / ".config"
@@ -314,14 +322,9 @@ def main() -> None:
     if "\tnradio,c2000-ultra)\n" not in net_text:
         mac_block = (
             "\tnradio,c2000-ultra)\n"
-            '\t\tlan_mac=$(mtd_get_mac_ascii bdinfo "fac_mac")\n'
-            '\t\t[ -n "$lan_mac" ] || lan_mac=$(mtd_get_mac_binary Factory 0xffff4)\n'
-            '\t\tcase "$lan_mac" in\n'
-            '\t\t""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)\n'
-            "\t\t\tlan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)\n"
-            "\t\t\t;;\n"
-            "\t\tesac\n"
-            '\t\twan_mac=$(macaddr_add "$lan_mac" 1)\n'
+            "\t\t. /lib/functions/nradio-c2000.sh\n"
+            "\t\tlan_mac=$(c2000_get_base_mac)\n"
+            '\t\t[ -n "$lan_mac" ] && wan_mac=$(macaddr_add "$lan_mac" 1)\n'
             "\t\tlabel_mac=$lan_mac\n"
             "\t\t;;\n"
         )
@@ -335,20 +338,15 @@ def main() -> None:
     if "\tnradio,c2000-ultra)\n" not in wmac_text:
         wmac_block = (
             "\tnradio,c2000-ultra)\n"
+            "\t\t. /lib/functions/nradio-c2000.sh\n"
             '\t\tcur_mac=$(cat /sys${DEVPATH}/macaddress 2>/dev/null)\n'
-            '\t\tcase "$cur_mac" in\n'
-            '\t\t""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)\n'
-            '\t\t\tbase_mac=$(mtd_get_mac_ascii bdinfo "fac_mac")\n'
-            '\t\t\t[ -n "$base_mac" ] || base_mac=$(mtd_get_mac_binary Factory 0xffff4)\n'
-            '\t\t\tcase "$base_mac" in\n'
-            '\t\t\t""|00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|00:0c:43:*|02:0c:43:*)\n'
-            "\t\t\t\tbase_mac=$(macaddr_generate_from_mmc_cid mmcblk0)\n"
-            "\t\t\t\t;;\n"
-            "\t\t\tesac\n"
-            '\t\t\t[ "$PHYNBR" = "0" ] && macaddr_add "$base_mac" 2 > /sys${DEVPATH}/macaddress\n'
-            '\t\t\t[ "$PHYNBR" = "1" ] && macaddr_add "$base_mac" 3 > /sys${DEVPATH}/macaddress\n'
-            "\t\t\t;;\n"
-            "\t\tesac\n"
+            '\t\tif ! c2000_mac_is_valid_unicast "$cur_mac"; then\n'
+            "\t\t\tbase_mac=$(c2000_get_base_mac)\n"
+            '\t\t\tif [ -n "$base_mac" ]; then\n'
+            '\t\t\t\t[ "$PHYNBR" = "0" ] && macaddr_add "$base_mac" 2 > /sys${DEVPATH}/macaddress\n'
+            '\t\t\t\t[ "$PHYNBR" = "1" ] && macaddr_add "$base_mac" 3 > /sys${DEVPATH}/macaddress\n'
+            "\t\t\tfi\n"
+            "\t\tfi\n"
             "\t\t;;\n"
         )
         wmac_text = wmac_text.replace("\tnradio,c8-668gl)\n", wmac_block + "\tnradio,c8-668gl)\n", 1)

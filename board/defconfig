@@ -5,6 +5,8 @@ CONFIG_IB=y
 CONFIG_AUTOREMOVE=y
 # CONFIG_SIGN_FIRMWARE is not set
 CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+CONFIG_PACKAGE_uboot-envtools=y
+CONFIG_PACKAGE_zram-swap=y
 CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-ssl=y
 CONFIG_PACKAGE_luci-proto-ncm=y
