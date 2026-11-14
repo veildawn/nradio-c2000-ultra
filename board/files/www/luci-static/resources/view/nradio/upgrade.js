@@ -65,7 +65,9 @@ return view.extend({
 		else {
 			var badge = (st.same_base == 1)
 				? E('span', { 'class': 'label', 'style': 'background:#2eb872;color:#fff;padding:2px 8px;border-radius:3px;' }, '同源码版本')
-				: E('span', { 'class': 'label', 'style': 'background:#f0ad4e;color:#fff;padding:2px 8px;border-radius:3px;' }, '有新构建');
+				: (st.same_base == -1)
+					? E('span', { 'class': 'label', 'style': 'background:#999;color:#fff;padding:2px 8px;border-radius:3px;' }, '版本无法比较')
+					: E('span', { 'class': 'label', 'style': 'background:#f0ad4e;color:#fff;padding:2px 8px;border-radius:3px;' }, '有新构建');
 				nodes.push(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td left' }, '最新 Release'),
 				E('td', { 'class': 'td left' }, [
@@ -128,7 +130,7 @@ return view.extend({
 		this.barFill = this.barFill || E('div', { 'style': 'height:100%;width:0;background:#2eb872;transition:width .5s;' });
 		this.bar.replaceChildren(this.barFill);
 		this.dlBox.replaceChildren(E('h4', {}, '正在下载固件…'), this.bar);
-		return exec([ 'download', st.url, st.sha256 || '', mirror ]).then(L.bind(function() {
+		return exec([ 'download', st.url, st.sha256 || '', mirror, st.tag || '' ]).then(L.bind(function() {
 			this.pollDownload(0);
 		}, this));
 	},
@@ -154,7 +156,7 @@ return view.extend({
 					E('div', { 'class': 'alert-message success' },
 						'SHA-256 校验通过：%s'.format((st.sha256 || '').slice(0, 16) + '…'))
 				);
-				this.renderFlash();
+				this.renderFlash(st.tag);
 			}
 			else if (st.state == 'error') {
 				this.dlBox.replaceChildren(
@@ -168,8 +170,20 @@ return view.extend({
 		}, this));
 	},
 
-	renderFlash: function() {
+	renderFlash: function(dlTag) {
 		this.flashBox.style.display = '';
+		/* Bind the staged image to the release it came from: a leftover
+		 * image from an older release must not be flashed while the page
+		 * advertises the metadata of a newer one. */
+		var stale = (this.latest && dlTag && this.latest.tag && dlTag != this.latest.tag);
+		if (stale) {
+			this.flashBox.replaceChildren(
+				E('h4', {}, '已下载固件版本不匹配'),
+				E('div', { 'class': 'alert-message warning' },
+					'/tmp 中的固件来自旧 Release「%s」，而当前最新为「%s」。请点击上方「下载固件到路由器」重新获取。'.format(dlTag, this.latest.tag))
+			);
+			return;
+		}
 		this.flashBox.replaceChildren(
 			E('h4', {}, '选择升级方式'),
 			E('div', { 'style': 'display:flex;gap:.5em;flex-wrap:wrap;' }, [
@@ -256,7 +270,7 @@ return view.extend({
 				E('div', { 'class': 'alert-message success' },
 					'SHA-256 校验通过：%s…（/tmp 已有下载好的固件）'.format((data.dl.sha256 || '').slice(0, 16)))
 			);
-			this.renderFlash();
+			this.renderFlash(data.dl.tag);
 		}
 		return E('div', {}, [
 			E('h2', {}, '在线固件更新'),

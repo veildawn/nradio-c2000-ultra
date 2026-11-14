@@ -559,6 +559,11 @@ bringup_once() {
 	config_get_bool thermal_guard modem thermal_guard 1
 
 	if [ "$enabled" != "1" ]; then
+		# Honor the "cut power & stop dialing" contract: tear the session
+		# down and hard-off the modem (cpe-pwr is active-low) every tick,
+		# so a disable while connected takes effect within one cycle.
+		ifdown wwan >/dev/null 2>&1
+		gpio_set cpe-pwr 0
 		set_cellular_leds 0 0
 		rm -f "$STATUS_RAW_STAMP"
 		return 0
@@ -592,14 +597,21 @@ bringup_once() {
 
 	ensure_modem_nvram "$fix_nvram" || return 1
 
-	# Fast path: if wwan already has carrier + IP and SIM slot config has not changed,
-	# avoid re-running registration/APN setup; only check RAT LEDs (if off) and
-	# sample AT^CHIPTEMP? every 2nd daemon tick (~60s).
-	local active_slot led5_val led4_val tick
+	# Fast path: if wwan already has carrier + IP, the SIM slot config has not
+	# changed and the configured APN matches the dialed one, avoid re-running
+	# registration/APN setup; only check RAT LEDs (if off) and sample
+	# AT^CHIPTEMP? every 2nd daemon tick (~60s).
+	local active_slot led5_val led4_val tick cur_apn
 	active_slot=$(cat "$SLOT_STAMP" 2>/dev/null | tr -d ' \r\n')
+	cur_apn=$(uci -q get network.wwan.apn)
 	if [ -n "$MODEM_NET" ] && [ "$(cat "/sys/class/net/$MODEM_NET/carrier" 2>/dev/null)" = "1" ] && wwan_has_ip; then
 		rm -f "$PWR_RESCUE_STAMP"
-		if [ "$sim_slot" = "auto" ] || [ -z "$sim_slot" ] || [ "$sim_slot" = "$active_slot" ]; then
+		apn_in_sync=0
+		case "$cfg_apn" in
+		""|auto) apn_in_sync=1 ;;
+		*) [ "$cfg_apn" = "$cur_apn" ] && apn_in_sync=1 ;;
+		esac
+		if { [ "$sim_slot" = "auto" ] || [ -z "$sim_slot" ] || [ "$sim_slot" = "$active_slot" ]; } && [ "$apn_in_sync" = "1" ]; then
 			led5_val=$(cat /sys/class/leds/blue:indicator-0/brightness 2>/dev/null | tr -d ' \r\n')
 			led4_val=$(cat /sys/class/leds/blue:indicator-1/brightness 2>/dev/null | tr -d ' \r\n')
 			if [ "${led5_val:-0}" = "0" ] && [ "${led4_val:-0}" = "0" ]; then
@@ -618,10 +630,9 @@ bringup_once() {
 	check_modem_thermal "$thermal_guard"
 
 	# Sync discovered AT port & network device into UCI if changed
-	local uci_dirty=0 cur_dev cur_if cur_apn imsi auto_apn target_apn
+	local uci_dirty=0 cur_dev cur_if imsi auto_apn target_apn
 	cur_dev=$(uci -q get network.wwan.device)
 	cur_if=$(uci -q get network.wwan.ifname)
-	cur_apn=$(uci -q get network.wwan.apn)
 
 	if [ "$cur_dev" != "$MODEM_AT" ]; then
 		uci set network.wwan.device="$MODEM_AT"

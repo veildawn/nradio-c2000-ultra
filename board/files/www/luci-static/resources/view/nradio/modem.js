@@ -141,11 +141,13 @@ return view.extend({
 			var cfgslot = (st.sim.configured_slot)
 				? (slotNames[st.sim.configured_slot] || st.sim.configured_slot) : '—';
 
-			if (absent) {
-				this.cSim.textContent = '未检测到 SIM 卡 ｜ 当前卡槽：%s'.format(slot);
-			}
-			else if (switching || stale) {
+			if (switching || stale) {
+				/* an absent verdict requires a completed snapshot; never
+				 * report "no SIM" while no AT query has finished yet */
 				this.cSim.textContent = '正在检测 SIM 卡… ｜ 卡槽：%s（配置：%s）'.format(slot, cfgslot);
+			}
+			else if (absent) {
+				this.cSim.textContent = '未检测到 SIM 卡 ｜ 当前卡槽：%s'.format(slot);
 			}
 			else {
 				var simTxt = '%s ｜ 卡槽：%s'.format(st.sim.state_cn || st.sim.state || '未知', slot);
@@ -160,11 +162,12 @@ return view.extend({
 			this.cIds.textContent = (absent || switching || stale)
 				? '—' : '%s / %s'.format(st.sim.imsi || '—', st.sim.iccid || '—');
 
-			if (absent) {
-				this.cReg.textContent = '未注册（无 SIM 卡）';
-			}
-			else if (switching || stale) {
+
+			if (switching || stale) {
 				this.cReg.textContent = '检测中…';
+			}
+			else if (absent) {
+				this.cReg.textContent = '未注册（无 SIM 卡）';
 			}
 			else {
 				var reg = [];
@@ -180,11 +183,11 @@ return view.extend({
 				this.cReg.textContent = reg.join(' ｜ ');
 			}
 
-			if (absent) {
-				this.cSig.replaceChildren(E('span', {}, '无服务'));
-			}
-			else if (switching || stale || !st.signal.sysmode) {
+			if (switching || stale || !st.signal.sysmode) {
 				this.cSig.replaceChildren(E('span', {}, '检测中…'));
+			}
+			else if (absent) {
+				this.cSig.replaceChildren(E('span', {}, '无服务'));
 			}
 			else {
 				this.cSig.replaceChildren(renderSignalWidget(st));

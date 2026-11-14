@@ -91,12 +91,16 @@ do_check() {
 
 	cur_info
 	# release tags may carry the short form (r38246) or the full revision
-	# (r38246-24c13d794c); treat as same base when it prefixes the running one
+	# (r38246-24c13d794c); a tag without any rNNNNN (e.g. v1.0.0) cannot be
+	# compared -> same_base -1 (unknown) so the UI shows a neutral badge
 	tag_rev=$(printf '%s' "$tag" | sed -n 's/.*\(r[0-9][0-9]*\).*/\1/p')
-	same=0
-	case "$CUR_REV" in
-	"$tag_rev"|"$tag_rev"-*) same=1 ;;
-	esac
+	same=-1
+	if [ -n "$tag_rev" ]; then
+		same=0
+		case "$CUR_REV" in
+		"$tag_rev"|"$tag_rev"-*) same=1 ;;
+		esac
+	fi
 
 	json_init
 	json_add_string "tag" "$tag"
@@ -113,14 +117,15 @@ do_check() {
 }
 
 do_download() {
-	local url="$1" expected="$2" mirror="${3:-}"
+	local url="$1" expected="$2" mirror="${3:-}" tag="${4:-}"
 	[ -n "$url" ] || return 1
 
 	# github.com release downloads may be unreachable on CN uplinks; an
 	# optional mirror prefix (gh proxy) is honored — integrity still comes
 	# from the api.github.com digest comparison, not the mirror
 	case "$mirror" in
-	*github.com*|*"") ;;
+	"") ;;
+	*github.com) ;;
 	*)
 		case "$mirror" in
 		*/) url="${mirror}${url}" ;;
@@ -130,13 +135,16 @@ do_download() {
 	esac
 
 	rm -f "$PART" "$BIN"
-	state_set state downloading expected "$expected" total 0
+	state_set state downloading expected "$expected" tag "$tag" total 0
 
-	# Fully detached worker: survives the rpcd exec call that spawned it
+	# Fully detached worker: survives the rpcd exec call that spawned it.
+	# The done state keeps tag+expected so the UI can detect a staged image
+	# left over from an older release.
 	setsid sh -c '
-		url="$1"; part="$2"; bin="$3"; state="$4"; expected="$5"
+		url="$1"; part="$2"; bin="$3"; state="$4"; expected="$5"; tag="$6"
 		echo "state=downloading" > "$state"
 		echo "expected=$expected" >> "$state"
+		echo "tag=$tag" >> "$state"
 		wget -q -T 90 -O "$part" "$url"
 		rc=$?
 		if [ "$rc" != "0" ] || [ ! -s "$part" ]; then
@@ -154,8 +162,10 @@ do_download() {
 		fi
 		mv "$part" "$bin"
 		echo "state=done" > "$state"
+		echo "expected=$expected" >> "$state"
+		echo "tag=$tag" >> "$state"
 		echo "sha256=$got" >> "$state"
-	' -- "$url" "$PART" "$BIN" "$STATE" "$expected" >/dev/null 2>&1 &
+	' -- "$url" "$PART" "$BIN" "$STATE" "$expected" "$tag" >/dev/null 2>&1 &
 
 	json_init
 	json_add_string "started" "1"
@@ -163,12 +173,13 @@ do_download() {
 }
 
 do_status() {
-	local st="" expected="" got_bytes=0 msg="" sha=""
+	local st="" expected="" got_bytes=0 msg="" sha="" tag=""
 	if [ -f "$STATE" ]; then
 		st=$(sed -n 's/^state=//p' "$STATE" | tail -n 1)
 		expected=$(sed -n 's/^expected=//p' "$STATE" | tail -n 1)
 		msg=$(sed -n 's/^msg=//p' "$STATE" | tail -n 1)
 		sha=$(sed -n 's/^sha256=//p' "$STATE" | tail -n 1)
+		tag=$(sed -n 's/^tag=//p' "$STATE" | tail -n 1)
 	fi
 	[ -n "$st" ] || st="idle"
 	if [ -f "$PART" ]; then
@@ -181,6 +192,7 @@ do_status() {
 	json_add_string "state" "$st"
 	json_add_int "bytes" "$got_bytes"
 	json_add_string "expected" "$expected"
+	json_add_string "tag" "$tag"
 	json_add_string "sha256" "$sha"
 	json_add_string "msg" "$msg"
 	json_add_boolean "have_image" $([ -f "$BIN" ] && echo 1 || echo 0)
@@ -214,7 +226,7 @@ check)
 	do_check
 	;;
 download)
-	do_download "${2:-}" "${3:-}"
+	do_download "${2:-}" "${3:-}" "${4:-}" "${5:-}"
 	;;
 status)
 	do_status
@@ -223,7 +235,7 @@ preflight)
 	do_preflight
 	;;
 *)
-	echo "Usage: $0 {check|download <url> <sha256> [mirror-prefix]|status|preflight}" >&2
+	echo "Usage: $0 {check|download <url> <sha256> [mirror-prefix] [tag]|status|preflight}" >&2
 	exit 1
 	;;
 esac

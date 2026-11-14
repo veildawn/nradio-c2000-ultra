@@ -68,9 +68,17 @@ MODEM_AT=$(uci -q get network.wwan.device)
 RAW=$(cat "$RAW_STAMP" 2>/dev/null)
 AGE=$(stamp_age)
 
+wwan_is_pending() {
+	ubus call network.interface.wwan status 2>/dev/null | grep -q '"pending":[[:space:]]*true'
+}
+
 if [ -n "$MODEM_AT" ] && { [ -z "$RAW" ] || [ "$AGE" -gt "$STALE_AFTER" ]; }; then
-	# try a direct sweep only when the daemon lock is instantly free
-	if lock -n "$LOCKFILE" 2>/dev/null; then
+	# Never sweep while netifd's ncm.sh owns the AT port: it does not take
+	# our private lock, and interleaving a 30s sweep with a dial attempt
+	# can break registration (same guard as refresh_status_raw).
+	if wwan_is_pending; then
+		BUSY=1
+	elif lock -n "$LOCKFILE" 2>/dev/null; then
 		# gcom occasionally segfaults on exit after printing valid output,
 		# so validity is judged by content (*OK*) rather than exit status
 		out=$(CMD_ICCID='AT^ICCID?' CMD_HCSQ='AT^HCSQ?' CMD_SCICHG='AT^SCICHG?' CMD_CHIPTEMP='AT^CHIPTEMP?' \
