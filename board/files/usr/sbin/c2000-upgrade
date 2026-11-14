@@ -19,6 +19,7 @@ BIN="/tmp/c2000-upgrade-sysupgrade.bin"
 PART="$BIN.part"
 CACHE="/tmp/c2000-upgrade.release"
 LOCK="/tmp/c2000-upgrade.lock"
+RELEASE_FILE="/rom/usr/share/nradio-c2000/release"
 umask 077
 
 cur_info() {
@@ -202,6 +203,7 @@ do_check() {
 	json_add_int "kernel_match" "$kmatch"
 	json_add_string "release_kernel" "$rel_kver"
 	json_add_string "current_kernel" "$cur_kver"
+	json_add_string "current_tag" "$(cat "$RELEASE_FILE" 2>/dev/null)"
 	json_add_string "current_rev" "$CUR_REV"
 	json_add_string "current_date" "$CUR_DATE"
 	json_dump > "$CACHE.$$" && mv -f "$CACHE.$$" "$CACHE"

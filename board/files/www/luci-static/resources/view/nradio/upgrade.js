@@ -55,18 +55,19 @@ return view.extend({
 	renderCheck: function(st) {
 		this.latest = st;
 		var rows = [
-			[ '当前固件', '%s（构建于 %s）'.format(st.current_rev || '—', fmtDate(st.current_date)) ],
+			[ '当前固件', st.current_tag || '未记录发布版本' ],
+			[ '当前 OpenWrt 基线', '%s（上游构建于 %s）'.format(st.current_rev || '—', fmtDate(st.current_date)) ],
 			[ '最新发布', st.tag || '—' ],
 			[ '发布时间', (st.published || '—').replace('T', ' ').replace(/Z$/, ' UTC') ],
 			[ '固件大小', fmtSize(st.size) ],
 			[ '内核版本', '%s → %s'.format(st.current_kernel || '未知', st.release_kernel || '未知') ]
 		];
-		this.checkBox.replaceChildren(E('table', { 'class': 'table' }, rows.map(function(row) {
+		this.checkBox.replaceChildren(E('table', { 'class': 'table' }, E('tbody', {}, rows.map(function(row) {
 			return E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left', 'width': '30%' }, row[0]),
+				E('th', { 'scope': 'row', 'class': 'td left', 'width': '30%' }, row[0]),
 				E('td', { 'class': 'td left' }, row[1])
 			]);
-		})));
+		}))));
 		if (st.kernel_match !== 1)
 			this.checkBox.appendChild(E('div', { 'class': 'alert-message warning' },
 				st.kernel_match === 0

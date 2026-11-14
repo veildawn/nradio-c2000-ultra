@@ -85,6 +85,8 @@ printf '%s\\n' "$*" >> "$TEST_ROOT/flash-calls"
         src = src.replace('. /lib/functions.sh', '').replace('. /usr/share/libubox/jshn.sh', f'. "{self.root}/json.sh"')
         src = src.replace('/tmp/c2000-upgrade', str(self.root / 'c2000-upgrade'))
         src = src.replace('/sbin/sysupgrade', str(self.root / 'commands/sysupgrade'))
+        self.installed_release = self.root / 'installed-release'
+        src = src.replace('/rom/usr/share/nradio-c2000/release', str(self.installed_release))
         self.script = self.root / 'updater'
         self.script.write_text(src)
         self.env['PATH'] = str(self.root / 'commands') + ':' + self.env['PATH']
@@ -223,8 +225,14 @@ fi
             name='NRadio Linux 6.18.60', published_at='2026-11-14T00:00:00Z', assets=[dict(
                 name='openwrt-nradio_c2000-ultra-squashfs-sysupgrade.bin', browser_download_url=self.url,
                 size=1024, digest='sha256:' + self.digest)])))
-        self.assertEqual(self.call('check', 'force')['kernel_match'], 1)
-        self.assertEqual((self.root / 'api-calls').read_text(), 'call\n')
+        result = self.call('check', 'force')
+        self.assertEqual(result['kernel_match'], 1)
+        self.assertEqual(result['current_tag'], '')
+        self.installed_release.write_text('v1.0.0\n')
+        result = self.call('check', 'force')
+        self.assertEqual(result['current_tag'], 'v1.0.0')
+        self.assertEqual(result['tag'], self.tag)
+        self.assertEqual((self.root / 'api-calls').read_text(), 'call\ncall\n')
 
     def test_release_baseline_comparison(self):
         for tag, title, revision, same in (

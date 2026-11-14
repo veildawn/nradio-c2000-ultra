@@ -112,6 +112,7 @@ class UITests(unittest.TestCase):
         self.page.evaluate('source => mount(source)', source)
 
     def test_upgrade_renders_before_network_check_finishes(self):
+        self.page.evaluate("Object.assign(fake.release, {current_tag: 'v1.0.0', current_rev: 'r38253-e2ed57b957'})")
         self.page.evaluate('fake.slowCheck = true')
         self.mount('upgrade')
         self.assertTrue(self.page.get_by_role('heading', name='在线固件更新', exact=True).is_visible())
@@ -119,6 +120,10 @@ class UITests(unittest.TestCase):
         self.page.evaluate('finishCheck()')
         self.page.wait_for_function('!current.checking')
         self.assertTrue(self.page.get_by_role('button', name='下载固件到路由器').is_enabled())
+        installed = self.page.get_by_role('row').filter(has=self.page.get_by_role('rowheader', name='当前固件'))
+        baseline = self.page.get_by_role('row').filter(has=self.page.get_by_role('rowheader', name='当前 OpenWrt 基线'))
+        self.assertEqual(installed.get_by_role('cell').inner_text(), 'v1.0.0')
+        self.assertIn('r38253-e2ed57b957', baseline.get_by_role('cell').inner_text())
 
     def test_download_restore_progress_rpc_error_and_completion(self):
         self.page.evaluate("fake.status = {state: 'downloading', bytes: 512, total: 1024, tag: 'v-old'}")
