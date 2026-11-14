@@ -17,15 +17,6 @@ else
 	[ "$(uci -q get network.wwan.mode)" = "auto" ] && uci -q delete network.wwan.mode
 fi
 
-# 1b. Human-readable labels so the LuCI Interfaces page explains the
-#     3-interface NCM split (AT control plane + dynamic v4/v6 data planes).
-uci set network.wwan.label='5G 模组（AT 拨号控制）'
-if uci -q get network.wwan_4 >/dev/null; then
-	uci set network.wwan_4.label='5G 数据 IPv4（模组 DHCP）'
-	uci set network.wwan_6.label='5G 数据 IPv6（模组 DHCPv6/中继）'
-fi
-uci set network.wan.label='有线 WAN（2.5G 备用上行）'
-uci set network.wan6.label='有线 WAN IPv6'
 uci commit network
 
 # 2. Attach wwan and dynamic NCM DHCPv4/DHCPv6 sub-interfaces (wwan_4, wwan_6)
