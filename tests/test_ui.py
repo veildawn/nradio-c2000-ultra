@@ -240,9 +240,10 @@ class UITests(unittest.TestCase):
                 return command === 'copy';
             };
         }""")
-        self.page.locator('#mt5700_imsi').get_by_role('button', name='复制', exact=True).click()
+        imsi = self.page.locator('#mt5700_imsi .nr-md-copychip').filter(has_text='IMSI:')
+        imsi.get_by_role('button', name='复制', exact=True).click()
         self.assertEqual(self.page.evaluate('window.copied'), '460010928378821')
-        self.assertIn('已复制', self.page.locator('#mt5700_imsi').get_by_role('status').inner_text())
+        self.assertIn('已复制', imsi.get_by_role('status').inner_text())
         self.page.get_by_role('button', name='隐藏敏感标识').click()
         self.assertNotIn('460010928378821', self.page.locator('#mt5700_imsi').inner_text())
 
