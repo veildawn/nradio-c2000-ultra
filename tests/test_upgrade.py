@@ -75,7 +75,7 @@ while [ -e "$TEST_ROOT/pause-download" ]; do sleep 0.1; done
 cp "$TEST_ROOT/fixture.bin" "$1"
 ''')
         self.stub('uclient-fetch', 'echo call >> "$TEST_ROOT/api-calls"; cat "$TEST_ROOT/release.json"')
-        self.stub('ubus', 'echo \'{"release":{"revision":"r38246-test","builddate":1794614400}}\'')
+        self.stub('ubus', 'echo \'{"release":{"revision":"r38246-24c13d794c","builddate":1794614400}}\'')
         self.stub('sysupgrade', '''
 printf '%s\\n' "$*" >> "$TEST_ROOT/flash-calls"
 [ ! -e "$TEST_ROOT/reject-image" ] || exit 1
@@ -225,6 +225,24 @@ fi
                 size=1024, digest='sha256:' + self.digest)])))
         self.assertEqual(self.call('check', 'force')['kernel_match'], 1)
         self.assertEqual((self.root / 'api-calls').read_text(), 'call\n')
+
+    def test_release_baseline_comparison(self):
+        for tag, title, revision, same in (
+            ('v1.0.0', 'OpenWrt Snapshot r38246-test (Linux 6.18.60)', '', -1),
+            ('v1.0.0', 'OpenWrt Snapshot r38246-24c13d794c (Linux 6.18.60)', 'r38246-24c13d794c', 1),
+            ('v1.0.0', 'OpenWrt Snapshot r38253-e2ed57b957 (Linux 6.18.60)', 'r38253-e2ed57b957', 0),
+            ('v-test-r38246', 'NRadio Linux 6.18.60', 'r38246', 1),
+        ):
+            with self.subTest(tag=tag, title=title):
+                (self.root / 'release.json').write_text(json.dumps(dict(
+                    tag_name=tag, name=title, assets=[dict(
+                        name='openwrt-nradio_c2000-ultra-squashfs-sysupgrade.bin',
+                        browser_download_url=self.url, size=1024,
+                        digest='sha256:' + self.digest)])))
+                result = self.call('check', 'force')
+                self.assertEqual(result['rev'], revision)
+                self.assertEqual(result['same_base'], same)
+                self.assertEqual(result['kernel_match'], 1)
 
 
 if __name__ == '__main__':

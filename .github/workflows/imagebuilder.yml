@@ -118,6 +118,7 @@ jobs:
               # APK manifests use "pkgname-version"; legacy OPKG used "pkgname - version".
               # The first whitespace token is the package name in both formats.
               pkgs = {line.split()[0] for line in mf if line.strip()}
+          assert "kmod-tun" in pkgs, "Firmware is missing kmod-tun"
           if "luci-i18n-base-zh-cn" in pkgs:
               for app in sorted(p for p in pkgs if p.startswith("luci-app-")):
                   i18n = f"luci-i18n-{app.removeprefix('luci-app-')}-zh-cn"

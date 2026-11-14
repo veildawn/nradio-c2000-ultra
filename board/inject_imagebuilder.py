@@ -39,6 +39,7 @@ DEVICE_PACKAGES = [
     "f2fsck",
     "mkf2fs",
     "kmod-fs-f2fs",
+    "kmod-tun",
     "uboot-envtools",
     "zram-swap",
 ]

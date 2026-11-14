@@ -98,7 +98,7 @@ release_lock() {
 }
 
 do_check() {
-	local raw tag pub url size sha sha_url tag_rev same rel_name rel_kver cur_kver kmatch age
+	local raw tag pub url size sha sha_url rel_rev same rel_name rel_kver cur_kver kmatch age
 	if [ "${1:-}" != "force" ] && [ -s "$CACHE" ]; then
 		age=$(( $(date +%s) - $(date -r "$CACHE" +%s) ))
 		if [ "$age" -ge 0 ] && [ "$age" -lt 300 ]; then cat "$CACHE"; return 0; fi
@@ -175,21 +175,24 @@ do_check() {
 	fi
 
 	cur_info
-	# release tags may carry the short form (r38246) or the full revision
-	# (r38246-24c13d794c); a tag without any rNNNNN (e.g. v1.0.0) cannot be
-	# compared -> same_base -1 (unknown) so the UI shows a neutral badge
-	tag_rev=$(printf '%s' "$tag" | sed -n 's/.*\(r[0-9][0-9]*\).*/\1/p')
+	# CI puts the actual OpenWrt revision in the title. Older releases
+	# may identify their baseline only in the tag.
+	rel_rev=$(printf '%s\n' "$rel_name" | sed -n 's/^OpenWrt Snapshot \(r[0-9][0-9]*-[0-9a-f][0-9a-f]*\) (Linux .*/\1/p')
+	[ -n "$rel_rev" ] || rel_rev=$(printf '%s\n' "$tag" | sed -n 's/.*-\(r[0-9][0-9]*\)\(-[0-9a-f][0-9a-f]*\)\{0,1\}$/\1\2/p')
 	same=-1
-	if [ -n "$tag_rev" ]; then
+	if [ -n "$rel_rev" ] && [ -n "$CUR_REV" ]; then
 		same=0
 		case "$CUR_REV" in
-		"$tag_rev"|"$tag_rev"-*) same=1 ;;
+		"$rel_rev") same=1 ;;
+		"${rel_rev%%-*}"-*)
+			[ "$rel_rev" = "${rel_rev%%-*}" ] && same=1
+			;;
 		esac
 	fi
 
 	json_init
 	json_add_string "tag" "$tag"
-	json_add_string "rev" "$tag_rev"
+	json_add_string "rev" "$rel_rev"
 	json_add_string "published" "$pub"
 	json_add_string "url" "$url"
 	json_add_int "size" "${size:-0}"
