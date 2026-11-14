@@ -9,6 +9,7 @@
 	import { getuid, getspnam } from 'luci.core';
 
 	const boardinfo = ubus.call('system', 'board') ?? {};
+	const astryx_host = ctx.path[1] == 'astryx';
 
 
 	http.prepare_content('text/html; charset=UTF-8');
@@ -21,6 +22,14 @@
 		<title>{{ striptags(`${boardinfo.hostname ?? '?'}${dispatched?.title ? ` | ${_(dispatched.title)}` : ''}`) }}</title>
 		<script>
 			(function() {
+				if (window.parent !== window) document.documentElement.classList.add('nr-embedded');
+				{% if (ctx.authsession && !astryx_host): %}
+				if (window.parent === window) {
+					var target = new URL({{ sprintf('%J', dispatcher.build_url('admin/astryx')) }}, location.href);
+					target.hash = new URLSearchParams({page: location.pathname + location.search + location.hash}).toString();
+					location.replace(target.href);
+				}
+				{% endif %}
 				var mode;
 				try { mode = localStorage.getItem('nradio-color-mode'); } catch (e) {}
 				if (mode !== 'light' && mode !== 'dark') mode = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -28,7 +37,7 @@
 				document.documentElement.setAttribute('data-darkmode', String(mode === 'dark'));
 			})();
 		</script>
-		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 		<meta name="darkreader-lock">
 		<link rel="stylesheet" href="{{ media }}/astryx.css">
 		{% if (dispatched?.css): %}
@@ -44,7 +53,7 @@
 	<body class="astryx-ui lang_{{ dispatcher.lang }} {{ ctx.authsession ? 'nr-authenticated' : 'nr-auth' }} {{ blank_page ? 'nr-blank' : '' }}" data-page="{{ entityencode(join('-', length(ctx.request_path) ? ctx.request_path : ctx.path), true) }}">
 		{% if (!blank_page): %}
 		<a class="nr-skip" href="#maincontent">{{ _('Skip to content') }}</a>
-		<div id="astryx-chrome" data-authenticated="{{ ctx.authsession ? '1' : '0' }}" data-hostname="{{ entityencode(boardinfo.hostname ?? 'OpenWrt', true) }}" data-version="{{ entityencode(version.distversion ?? 'OpenWrt', true) }}" data-home="{{ dispatcher.build_url('admin/status/overview') }}"></div>
+		<div id="astryx-chrome" data-authenticated="{{ ctx.authsession ? '1' : '0' }}" data-hostname="{{ entityencode(boardinfo.hostname ?? 'OpenWrt', true) }}" data-model="{{ entityencode(boardinfo.model ?? 'C2000 Ultra', true) }}" data-version="{{ entityencode(version.distversion ?? 'OpenWrt', true) }}" data-home="{{ dispatcher.build_url('admin/astryx') }}" data-base="{{ dispatcher.build_url() }}"></div>
 		<div id="indicators"></div>
 		<main id="maincontent" tabindex="-1">
 			<nav class="nr-fallback-nav" aria-label="{{ _('Navigation') }}">

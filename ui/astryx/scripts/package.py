@@ -23,7 +23,10 @@ with tarfile.open(output, 'w:gz') as archive:
     for path in (
         ASSETS,
         FILES / 'www/luci-static/resources/menu-astryx.js',
+        FILES / 'www/luci-static/resources/astryx-frame.js',
         FILES / 'usr/share/ucode/luci/template/themes/astryx',
+        FILES / 'usr/share/ucode/luci/template/nradio/astryx.ut',
+        FILES / 'usr/share/luci/menu.d/nradio-astryx.json',
         FILES / 'etc/uci-defaults/90-nradio-astryx-ui',
     ):
         archive.add(path, arcname=str(path.relative_to(FILES)), filter=normalized)

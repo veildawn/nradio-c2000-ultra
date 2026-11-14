@@ -49,7 +49,7 @@ jobs:
         run: |
           python3 -m py_compile board/apply.py board/inject_imagebuilder.py
           find board/files/etc/init.d board/files/etc/hotplug.d board/files/etc/uci-defaults board/files/usr/sbin board/files/lib/functions -type f -print0 | xargs -0 -n 1 sh -n
-          for script in board/files/www/luci-static/resources/view/nradio/*.js board/files/www/luci-static/resources/menu-astryx.js; do
+          for script in board/files/www/luci-static/resources/view/nradio/*.js board/files/www/luci-static/resources/menu-astryx.js board/files/www/luci-static/resources/astryx-frame.js; do
             node --check "$script"
           done
           python3 - <<'PY'
