@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from platform_upgrade import patch_platform_upgrade
+
 
 DEVICE_PACKAGES = [
     "kmod-usb3",
@@ -352,45 +354,9 @@ def main() -> None:
         wmac_text = wmac_text.replace("\tnradio,c8-668gl)\n", wmac_block + "\tnradio,c8-668gl)\n", 1)
     wmac_path.write_text(wmac_text)
 
-    # Patch staged platform.sh
+    # Install the same TF-only upgrade path as the full source build.
     plat_path = overlay / "lib/upgrade/platform.sh"
-    plat_text = plat_path.read_text()
-    if "nradio,c2000-ultra" not in plat_text:
-        # Dedicated do_upgrade branch: TF-card GPT partition labels are not
-        # exposed through uevent PARTNAME, so find_mmc_part resolves nothing
-        # and the generic emmc group would write no partition at all. Write
-        # the squashfs rootfs partition (root=PARTLABEL=rootfs -> mmcblk0p4)
-        # directly. The kernel partition (mmcblk0p3, vendor boot-image
-        # format) is left untouched: only the factory flasher repackages
-        # FIT kernels into it, and same-revision upgrades don't change it.
-        plat_text = plat_text.replace(
-            "\thuasifei,wh3000-pro-emmc|\\\n",
-            "\tnradio,c2000-ultra)\n"
-            "\t\t# TF GPT labels are not exposed via uevent PARTNAME, so\n"
-            "\t\t# find_mmc_part resolves nothing; write the squashfs rootfs\n"
-            "\t\t# partition directly and leave the vendor boot-image kernel\n"
-            "\t\t# partition untouched (only the factory flasher repackages\n"
-            "\t\t# FIT kernels into it; online updates are same-kernel only).\n"
-            "\t\t# A no-config upgrade must also wipe the persistent NOR\n"
-            "\t\t# rootfs_data overlay, or old /etc/config would survive.\n"
-            "\t\t[ \"${SAVE_CONFIG:-1}\" = \"0\" ] && mtd erase rootfs_data >/dev/null 2>&1\n"
-            "\t\texport EMMC_ROOT_DEV=\"/dev/mmcblk0p4\"\n"
-            "\t\temmc_do_upgrade \"$1\"\n"
-            "\t\t;;\n"
-            "\thuasifei,wh3000-pro-emmc|\\\n",
-            1,
-        )
-        plat_text = plat_text.replace(
-            "\thiveton,h5000m|\\\n\tnradio,c8-668gl)",
-            "\thiveton,h5000m|\\\n\tnradio,c2000-ultra|\\\n\tnradio,c8-668gl)",
-            1,
-        )
-        plat_text = plat_text.replace(
-            "\tnradio,c8-668gl|\\\n",
-            "\tnradio,c2000-ultra|\\\n\tnradio,c8-668gl|\\\n",
-            1,
-        )
-    plat_path.write_text(plat_text)
+    plat_path.write_text(patch_platform_upgrade(plat_path.read_text()))
 
     # Stage /etc/gcom/ncm.json with TD Tech MT5700M-CN 5G profile
     mt5700m_profile = {

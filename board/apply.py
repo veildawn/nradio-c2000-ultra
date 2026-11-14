@@ -8,6 +8,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from platform_upgrade import patch_platform_upgrade
+
 
 EXEC_DIRS = {"init.d", "uci-defaults", "sbin", "bin"}
 
@@ -185,51 +187,9 @@ TARGET_DEVICES += nradio_c2000-ultra
             )
             ubenv_path.write_text(ubenv_text)
 
-    # 5. Update platform.sh (GPT rootfs-only emmc upgrade + ustar check + copy_config)
+    # 5. Install the TF-only upgrade and configuration backup path.
     plat_path = root / "target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"
-    plat_text = plat_path.read_text()
-    if "nradio,c2000-ultra" not in plat_text:
-        # Dedicated do_upgrade branch: find_mmc_part cannot resolve TF-card
-        # GPT labels (no uevent PARTNAME), so write the rootfs partition
-        # directly and leave the vendor boot-image kernel partition alone.
-        do_anchor = "\thuasifei,wh3000-pro-emmc|\\\n"
-        if do_anchor not in plat_text:
-            sys.exit("ERROR: platform_do_upgrade anchor missing in platform.sh")
-        plat_text = plat_text.replace(
-            do_anchor,
-            "\tnradio,c2000-ultra)\n"
-            "\t\t# TF GPT labels are not exposed via uevent PARTNAME, so\n"
-            "\t\t# find_mmc_part resolves nothing; write the squashfs rootfs\n"
-            "\t\t# partition directly and leave the vendor boot-image kernel\n"
-            "\t\t# partition untouched (only the factory flasher repackages\n"
-            "\t\t# FIT kernels into it; online updates are same-kernel only).\n"
-            "\t\t# A no-config upgrade must also wipe the persistent NOR\n"
-            "\t\t# rootfs_data overlay, or old /etc/config would survive.\n"
-            "\t\t[ \"${SAVE_CONFIG:-1}\" = \"0\" ] && mtd erase rootfs_data >/dev/null 2>&1\n"
-            "\t\texport EMMC_ROOT_DEV=\"/dev/mmcblk0p4\"\n"
-            "\t\temmc_do_upgrade \"$1\"\n"
-            "\t\t;;\n" + do_anchor,
-            1,
-        )
-
-        chk_anchor = "\thiveton,h5000m|\\\n\tnradio,c8-668gl)"
-        if chk_anchor not in plat_text:
-            sys.exit("ERROR: platform_check_image anchor missing in platform.sh")
-        plat_text = plat_text.replace(
-            chk_anchor,
-            "\thiveton,h5000m|\\\n\tnradio,c2000-ultra|\\\n\tnradio,c8-668gl)",
-            1,
-        )
-
-        cfg_anchor = "\tnradio,c8-668gl|\\\n"
-        if cfg_anchor not in plat_text:
-            sys.exit("ERROR: platform_copy_config anchor missing in platform.sh")
-        plat_text = plat_text.replace(
-            cfg_anchor,
-            "\tnradio,c2000-ultra|\\\n" + cfg_anchor,
-            1,
-        )
-        plat_path.write_text(plat_text)
+    plat_path.write_text(patch_platform_upgrade(plat_path.read_text()))
 
     # 6. Configure comgt ncm.json with verified 5G NR profile for TD Tech MT5700M-CN
     ncm_path = root / "package/network/utils/comgt/files/ncm.json"
