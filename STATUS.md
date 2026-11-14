@@ -68,7 +68,7 @@ python3 -m unittest discover -s tests -v
 
 新版设备树把板载原厂镜像分区暴露为只读的 `factory-firmware`，OpenWrt 不再从中拆出 MTD `rootfs_data`。OpenWrt 在现有 TF 卡第 4 分区（`/dev/mmcblk0p4`）的 SquashFS 之后使用独立的 `/overlay`，原厂继续使用其板载配置区。TF 分区表无需调整。正常在线升级和清除配置仅写 TF 卡，保留配置时只迁移 sysupgrade 备份选中的文件。
 
-首次安装从原厂 Web 的双系统页面将完整镜像烧录到 TF 卡，再选择第二系统启动。原厂烧录会安装 TF 内核和设备树，并初始化 TF 卡上的 OpenWrt 配置区。
+首次安装从原厂 Web 的双系统页面将完整镜像烧录到 TF 卡，再选择第二系统启动。原厂烧录会安装 TF 内核和设备树，并初始化 TF 卡上的 OpenWrt 配置区。安装首版请使用全新配置，旧测试镜像的备份可能带入已停用功能的 DNS 规则。
 
 启动后用 `grep ' /overlay ' /proc/self/mountinfo` 确认可写层来自 TF 卡上的 loop 设备，用 `cat /proc/mtd` 确认只暴露 `factory-firmware`，没有板载 `rootfs_data`。实机已确认 `/overlay` 通过 `/dev/loop0` 挂载，loop 后端为 `/mmcblk0p4`。
 
@@ -96,6 +96,8 @@ make -C ib image \
 仓库已内置 GitHub Actions 工作流 `.github/workflows/imagebuilder.yml`，支持在网页端手动输入自定义软件包列表并一键生成 Artifact 或 GitHub Release。
 
 ### 方式二：完整 OpenWrt 主线源码编译
+
+使用干净的上游源码树运行板级注入脚本。
 
 ```bash
 git clone https://github.com/openwrt/openwrt.git

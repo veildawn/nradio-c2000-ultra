@@ -16,6 +16,9 @@ def patch_platform_upgrade(text: str) -> str:
 		;;
 """
     if not text.startswith(upgrade, index):
+        end = text.index("\n}", index)
+        if f"\t{BOARD})\n" in text[index:end]:
+            raise ValueError("Use a clean Filogic platform.sh for this board port.")
         text = text[:index] + upgrade + text[index:]
 
     for function, anchor in (

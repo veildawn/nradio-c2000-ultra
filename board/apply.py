@@ -45,6 +45,11 @@ def main() -> None:
         else Path(__file__).resolve().parent
     )
 
+    mk_path = root / "target/linux/mediatek/image/filogic.mk"
+    mk_text = mk_path.read_text()
+    if "define Device/nradio_c2000-ultra\n" in mk_text:
+        sys.exit("ERROR: use a clean OpenWrt source tree for this board port.")
+
     # 1. Copy board DTS
     dts_src = board_dir / "mt7987a-nradio-c2000ultra.dts"
     dts_dst = root / "target/linux/mediatek/dts/mt7987a-nradio-c2000ultra.dts"
@@ -54,7 +59,7 @@ def main() -> None:
     base_files = root / "target/linux/mediatek/filogic/base-files"
     copy_board_files(board_dir / "files", base_files)
 
-    # 3. Register or update Device/nradio_c2000-ultra in filogic.mk
+    # 3. Register Device/nradio_c2000-ultra in filogic.mk
     device_block = """define Device/nradio_c2000-ultra
   DEVICE_VENDOR := NRadio
   DEVICE_MODEL := C2000 Ultra
@@ -74,20 +79,10 @@ endef
 TARGET_DEVICES += nradio_c2000-ultra
 
 """
-    mk_path = root / "target/linux/mediatek/image/filogic.mk"
-    mk_text = mk_path.read_text()
-    existing_dev_re = re.compile(
-        r"define Device/nradio_c2000-ultra\n.*?TARGET_DEVICES \+= nradio_c2000-ultra\n+",
-        re.S,
-    )
-    if existing_dev_re.search(mk_text):
-        mk_text = existing_dev_re.sub(device_block, mk_text, count=1)
-    else:
-        anchor = "define Device/nradio_c8-668gl"
-        if anchor not in mk_text:
-            sys.exit("ERROR: anchor missing in filogic.mk")
-        mk_text = mk_text.replace(anchor, device_block + anchor, 1)
-    mk_path.write_text(mk_text)
+    anchor = "define Device/nradio_c8-668gl"
+    if anchor not in mk_text:
+        sys.exit("ERROR: anchor missing in filogic.mk")
+    mk_path.write_text(mk_text.replace(anchor, device_block + anchor, 1))
 
     # 4. Update 02_network (LAN=eth1 internal 2.5G, WAN=eth0 EN8811H, strict unicast MACs)
     net_path = root / "target/linux/mediatek/filogic/base-files/etc/board.d/02_network"
