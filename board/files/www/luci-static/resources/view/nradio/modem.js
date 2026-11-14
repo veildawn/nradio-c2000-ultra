@@ -209,12 +209,18 @@ return view.extend({
 		var wwan = [];
 		if (st.wwan.pending)
 			wwan.push('正在拨号…');
-		if (st.wwan.up) {
+		/* "connected" requires an address on a data plane (wwan_4/wwan_6):
+		 * the NCM control interface can be up while DHCP never completed,
+		 * which the daemon itself treats as unhealthy and re-dials. */
+		if (st.wwan.up && (st.wwan.ip4 || st.wwan.ip6)) {
 			wwan.push('已连接');
 			if (st.wwan.ip4) wwan.push('IPv4：%s'.format(st.wwan.ip4));
 			if (st.wwan.ip6) wwan.push('IPv6：%s'.format(st.wwan.ip6));
 			if (num(st.carrier_link) === 0)
 				wwan.push('（模组网络链路已断开，等待重建）');
+		}
+		else if (st.wwan.up) {
+			wwan.push('连接建立中（尚未获取 IP）');
 		}
 		else if (!st.wwan.pending) {
 			wwan.push('未连接');

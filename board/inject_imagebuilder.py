@@ -366,6 +366,14 @@ def main() -> None:
         plat_text = plat_text.replace(
             "\thuasifei,wh3000-pro-emmc|\\\n",
             "\tnradio,c2000-ultra)\n"
+            "\t\t# TF GPT labels are not exposed via uevent PARTNAME, so\n"
+            "\t\t# find_mmc_part resolves nothing; write the squashfs rootfs\n"
+            "\t\t# partition directly and leave the vendor boot-image kernel\n"
+            "\t\t# partition untouched (only the factory flasher repackages\n"
+            "\t\t# FIT kernels into it; online updates are same-kernel only).\n"
+            "\t\t# A no-config upgrade must also wipe the persistent NOR\n"
+            "\t\t# rootfs_data overlay, or old /etc/config would survive.\n"
+            "\t\t[ \"${SAVE_CONFIG:-1}\" = \"0\" ] && mtd erase rootfs_data >/dev/null 2>&1\n"
             "\t\texport EMMC_ROOT_DEV=\"/dev/mmcblk0p4\"\n"
             "\t\temmc_do_upgrade \"$1\"\n"
             "\t\t;;\n"

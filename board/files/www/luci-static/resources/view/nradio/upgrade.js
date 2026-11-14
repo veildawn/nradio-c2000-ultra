@@ -79,13 +79,27 @@ return view.extend({
 						st.sha256 ? ' ｜ SHA-256：' + st.sha256.slice(0, 12) + '…' : ''))
 				])
 			]));
+			if (st.kernel_match === 0) {
+				nodes.push(E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left' }, '内核版本'),
+					E('td', { 'class': 'td left' }, [
+						E('div', { 'class': 'alert-message danger' },
+							'Release 内核 %s 与当前 %s 不一致：在线升级只覆写 rootfs（内核分区为原厂 boot 镜像格式），跨内核升级必须通过原厂 Web 界面刷入完整固件。'.format(st.release_kernel || '?', st.current_kernel || '?'))
+					])
+				]));
+			}
 			this.latest = st;
 		}
 
 		this.checkBox.replaceChildren(E('table', { 'class': 'table' }, nodes));
 
 		var actions = [];
-		if (!st.error && st.url) {
+		if (!st.error && st.url && st.kernel_match === 0) {
+			actions.push(E('div', { 'style': 'margin-bottom:.6em;' }, [
+				E('span', { 'style': 'color:#999;' }, '跨内核版本，在线升级已禁用（见上方说明）。')
+			]));
+		}
+		if (!st.error && st.url && st.kernel_match !== 0) {
 			this.mirrorInput = E('input', {
 				'type': 'text',
 				'class': 'cbi-input-text',

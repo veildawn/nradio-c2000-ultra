@@ -727,9 +727,14 @@ run_daemon() {
 	# Duplicate-instance guard: a previous daemon stuck in an uninterruptible
 	# AT port read can survive procd's SIGKILL and then race this instance for
 	# the tick lock. mkdir is atomic, so only one daemon can ever hold the
-	# lock dir; a stale dir whose recorded pid is dead is reclaimed.
+	# lock dir. A missing pid file gets a short grace period before reclaim:
+	# the winning process may simply not have written its pid yet.
 	if ! mkdir "$DAEMON_LOCKDIR" 2>/dev/null; then
 		opid=$(cat "$DAEMON_LOCKDIR/pid" 2>/dev/null | tr -cd '0-9')
+		if [ -z "$opid" ]; then
+			sleep 2
+			opid=$(cat "$DAEMON_LOCKDIR/pid" 2>/dev/null | tr -cd '0-9')
+		fi
 		if [ -n "$opid" ] && [ "$opid" != "$$" ] && kill -0 "$opid" 2>/dev/null; then
 			log "Refusing to start: another mt5700 daemon (pid $opid) is already running"
 			return 1
@@ -739,7 +744,15 @@ run_daemon() {
 	fi
 	echo $$ > "$DAEMON_LOCKDIR/pid"
 
-	trap 'rm -rf "$DAEMON_LOCKDIR"; release_lock; exit 0' INT TERM
+	# Clean up only our own lock dir: a restarting procd may spawn the
+	# successor before this (dying) instance runs its trap, and the
+	# successor's dir must not be removed from under it.
+	daemon_cleanup() {
+		[ "$(cat "$DAEMON_LOCKDIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$DAEMON_LOCKDIR"
+		release_lock
+		exit 0
+	}
+	trap daemon_cleanup INT TERM
 	while true; do
 		if acquire_lock; then
 			bringup_once
