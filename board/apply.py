@@ -73,7 +73,7 @@ def main() -> None:
 \tkmod-phy-airoha-en8811h airoha-en8811h-firmware \\
 \tmt7987-2p5g-phy-firmware kmod-hwmon-pwmfan \\
 \tkmod-mt7996e kmod-mt7992-23-firmware kmod-mt7992-firmware \\
-\te2fsprogs f2fsck mkf2fs kmod-fs-f2fs uboot-envtools zram-swap
+\te2fsprogs f2fsck mkf2fs kmod-fs-f2fs kmod-tun uboot-envtools zram-swap
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += nradio_c2000-ultra
