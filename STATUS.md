@@ -68,6 +68,14 @@ python3 -m unittest discover -s tests -v
 
 固件默认使用官方 LuCI 的 Bootstrap 主题。5G 蜂窝、应用管控、双系统切换和在线固件更新仍可从 LuCI 菜单打开。
 
+已启用 Astryx 的设备如果要保留配置升级，请在刷入前用 SSH 切回 Bootstrap，再开始升级：
+
+```sh
+uci set luci.main.mediaurlbase='/luci-static/bootstrap'
+uci -q delete luci.themes.Astryx
+uci commit luci
+```
+
 ### 方式一：官方 ImageBuilder 极速定制打包（推荐，约 30 秒）
 
 使用 `board/inject_imagebuilder.py` 可将板级 DTB、`0x40080000` FIT 内核与板级脚本直接注入官方 OpenWrt Snapshot `mediatek/filogic` ImageBuilder：
