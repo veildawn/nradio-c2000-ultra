@@ -49,9 +49,7 @@ jobs:
         run: |
           python3 -m py_compile board/apply.py board/inject_imagebuilder.py
           find board/files/etc/init.d board/files/etc/hotplug.d board/files/etc/uci-defaults board/files/usr/sbin board/files/lib/functions -type f -print0 | xargs -0 -n 1 sh -n
-          for script in board/files/www/luci-static/resources/view/nradio/*.js board/files/www/luci-static/resources/menu-astryx.js board/files/www/luci-static/resources/astryx-frame.js; do
-            node --check "$script"
-          done
+          find board/files/www -name '*.js' -type f -print0 | xargs -0 -r -n 1 node --check
           python3 - <<'PY'
           import json, pathlib
           for p in sorted(pathlib.Path('board/files').rglob('*.json')):
