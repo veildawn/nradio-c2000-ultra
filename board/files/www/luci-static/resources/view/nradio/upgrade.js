@@ -206,7 +206,8 @@ return view.extend({
 		var loc = this.localInfo || {};
 		if (loc.tag && st.tag)
 			return loc.tag === st.tag && st.same_base !== 0;
-		return !!(st.same_base === 1 && st.rev && st.rev.indexOf('-') > 0 && loc.rev === st.rev);
+		// 相同 OpenWrt 基线不代表相同项目发布；无标签时不可确认最新。
+		return false;
 	},
 
 	setNotice: function(text, isErr) {
