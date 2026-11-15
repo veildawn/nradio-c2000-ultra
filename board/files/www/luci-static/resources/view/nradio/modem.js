@@ -97,7 +97,9 @@ var nrBands = [
 	[422000, 434000, 'n1',  'Band n1 (2100 MHz FDD)'],
 	[460000, 480000, 'n40', 'Band n40 (2300 MHz TDD)'],
 	[499200, 537999, 'n41', 'Band n41 (2.6 GHz TDD)'],
-	[620000, 653333, 'n78', 'Band n78 (3.5 GHz TDD)'],
+	// n77 与 n78 频点重叠，仅凭 ARFCN 无法区分。
+	[620000, 653333, 'n77/n78', 'Band n77 / n78（频点重叠，无法仅凭 ARFCN 区分）'],
+	[653334, 680000, 'n77', 'Band n77 (3.3–4.2 GHz TDD)'],
 	[693334, 733333, 'n79', 'Band n79 (4.9 GHz TDD)']
 ];
 
@@ -1053,6 +1055,8 @@ return view.extend({
 	},
 
 	render: function(first) {
+		// 每次重新渲染都恢复默认脱敏，避免复用视图时泄露标识。
+		this.maskIds = true;
 		ensureStyle();
 		this.cells = {};
 		var self = this;
