@@ -264,9 +264,39 @@ class UITests(unittest.TestCase):
             self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'), 390)
 
         self.page.get_by_role('tab', name='小区与信号', exact=True).click()
-        self.assertIn('Band n78 (3.5 GHz TDD)', self.page.locator('#mt5700_cellrat').inner_text())
+        self.assertIn('Band n77 / n78', self.page.locator('#mt5700_cellrat').inner_text())
         self.assertIn('30 kHz', self.page.locator('#mt5700_celltable').inner_text())
         self.assertIn('0x1A2B3C01', self.page.locator('#mt5700_celltable').inner_text())
+
+    def test_modem_rerender_restores_identifier_masking(self):
+        self.page.evaluate("Object.assign(fake.modem.sim, {imsi: '460010928378821', iccid: '89860123801190284910'}); fake.modem.imei = '864920061940318'")
+        self.mount('modem')
+        self.page.get_by_role('button', name='显示完整标识').click()
+        self.assertFalse(self.page.evaluate('current.maskIds'))
+        self.page.evaluate("async () => { document.querySelector('.nr-md').remove(); document.body.append(await current.render(await current.load())); }")
+        self.assertTrue(self.page.evaluate('current.maskIds'))
+        self.assertTrue(self.page.get_by_role('button', name='显示完整标识').is_visible())
+        for value in ('460010928378821', '89860123801190284910', '864920061940318'):
+            self.assertNotIn(value, self.page.locator('.nr-md').inner_text())
+
+    def test_nr_band_overlap_boundaries(self):
+        self.mount('modem')
+        self.page.get_by_role('tab', name='小区与信号', exact=True).click()
+        for channel, expected in ((620000, 'n77 / n78'), (653333, 'n77 / n78'), (653334, 'n77 (')):
+            with self.subTest(channel=channel):
+                self.page.evaluate("channel => { fake.modem.cell = {rat: 'NR', raw: '460,01,' + channel + ',1,1A2B3C01,312,3104,-81,-9,-19'}; return poll.callbacks[0](); }", channel)
+                self.assertIn(expected, self.page.locator('#mt5700_cellrat').inner_text())
+
+    def test_untagged_build_is_not_exact_latest(self):
+        self.page.evaluate("fake.info.current_tag = ''; Object.assign(fake.release, {tag: 'v1.0.1', rev: fake.info.current_rev})")
+        self.mount('upgrade')
+        self.page.wait_for_function('!current.checking')
+        self.assertNotIn('当前已是最新', self.page.locator('body').inner_text())
+        self.assertIn('同基线可更新', self.page.locator('body').inner_text())
+        self.assertTrue(self.page.get_by_role('button', name='下载固件到路由器').is_enabled())
+        for tag, expected in (('v1.0.0', False), ('v1.0.1', True)):
+            with self.subTest(tag=tag):
+                self.assertEqual(self.page.evaluate("tag => { current.localInfo.tag = tag; return current.isExactLatest(fake.release); }", tag), expected)
 
     def test_upgrade_presets_and_mobile_layout(self):
         self.page.evaluate("fake.fail = 'check'; void 0;")
